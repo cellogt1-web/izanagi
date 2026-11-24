@@ -37,9 +37,9 @@ class MainWindow : public QMainWindow {
 
  private slots:
   void newArea();
-  void openArea();
-  void openAreaFile();
-  void openWorkspace();
+  void openAny();
+  void manageWorkspaces();
+  void addAreaToWorkspace();
   void saveArea();
   void saveAreaAs();
   void validateArea();
@@ -76,7 +76,9 @@ class MainWindow : public QMainWindow {
   void updateTitle();
   bool maybeSave();
   void markDirty();
-  void loadWorkspace(const QString& path);
+  void loadWorkspace(const QString& path, bool interactive = true);
+  void showWorkspaceManager(const QString& warning);
+  QString areasWithNameProblems() const;
   void openAreaFromWorkspace(const QString& area_path);
   void saveLastWorkspacePath(const QString& path);
   void restoreLastWorkspace();

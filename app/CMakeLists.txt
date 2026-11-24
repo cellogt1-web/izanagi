@@ -5,6 +5,8 @@ set(IZANAGI_RESOURCES
 add_executable(izanagi
   main.cpp
   main_window.cpp
+  workspace_manager.cpp
+  workspace_manager.hpp
   main_window.hpp
   app_theme.cpp
   app_theme.hpp

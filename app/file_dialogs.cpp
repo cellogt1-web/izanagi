@@ -1,7 +1,11 @@
 #include "file_dialogs.hpp"
 
 #include <QApplication>
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QGridLayout>
+#include <QPushButton>
 #include <QStandardPaths>
 
 namespace eleutheria_ui {
@@ -76,6 +80,56 @@ QString chooseSaveFile(QWidget* parent, const QString& title, const QString& fil
   dialog.setDefaultSuffix(QStringLiteral("ele"));
   if(dialog.exec() != QDialog::Accepted) {
     return {};
+  }
+  const auto files = dialog.selectedFiles();
+  return files.isEmpty() ? QString{} : files.front();
+}
+
+QString chooseFileOrDirectory(QWidget* parent, const QString& title, const QString& filter,
+                              const QString& start_dir) {
+  prepare_parent(parent);
+  QFileDialog dialog(parent, title, default_start(start_dir), filter);
+  configure_browser(&dialog);
+  dialog.setFileMode(QFileDialog::ExistingFile);
+  dialog.setAcceptMode(QFileDialog::AcceptOpen);
+
+  // Il dialogo Qt sa scegliere o file o cartelle: aggiungiamo un pulsante che
+  // apre la cartella selezionata (o quella in cui ci si trova).
+  QString chosen_dir;
+  QString highlighted_dir;
+  auto* folder_button = new QPushButton(&dialog);
+  auto update_button = [&]() {
+    const QString target =
+        highlighted_dir.isEmpty() ? dialog.directory().absolutePath() : highlighted_dir;
+    folder_button->setText(QStringLiteral("Apri cartella \"%1\"")
+                               .arg(QFileInfo(target).fileName().isEmpty()
+                                        ? target
+                                        : QFileInfo(target).fileName()));
+    folder_button->setToolTip(target);
+  };
+  QObject::connect(&dialog, &QFileDialog::currentChanged, &dialog, [&](const QString& path) {
+    highlighted_dir = QFileInfo(path).isDir() ? path : QString();
+    update_button();
+  });
+  QObject::connect(&dialog, &QFileDialog::directoryEntered, &dialog, [&](const QString&) {
+    highlighted_dir.clear();
+    update_button();
+  });
+  QObject::connect(folder_button, &QPushButton::clicked, &dialog, [&]() {
+    chosen_dir =
+        highlighted_dir.isEmpty() ? dialog.directory().absolutePath() : highlighted_dir;
+    static_cast<QDialog&>(dialog).done(QDialog::Accepted);
+  });
+  update_button();
+  if(auto* grid = qobject_cast<QGridLayout*>(dialog.layout())) {
+    grid->addWidget(folder_button, grid->rowCount(), 0, 1, grid->columnCount());
+  }
+
+  if(dialog.exec() != QDialog::Accepted) {
+    return {};
+  }
+  if(!chosen_dir.isEmpty()) {
+    return QDir::cleanPath(chosen_dir);
   }
   const auto files = dialog.selectedFiles();
   return files.isEmpty() ? QString{} : files.front();

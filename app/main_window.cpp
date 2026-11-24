@@ -3,6 +3,7 @@
 #include "app_theme.hpp"
 #include "editors.hpp"
 #include "file_dialogs.hpp"
+#include "workspace_manager.hpp"
 
 #include "eleutheria/area_io.hpp"
 #include "eleutheria/workspace.hpp"
@@ -13,6 +14,8 @@
 #include <QCloseEvent>
 #include <QColor>
 #include <QDockWidget>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -188,10 +191,11 @@ void MainWindow::editLineLengthLimit() {
 void MainWindow::buildUi() {
   auto* file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Nuova area", QKeySequence::New, this, &MainWindow::newArea);
-  file_menu->addAction("Apri &workspace Aree...", QKeySequence::Open, this,
-                       &MainWindow::openWorkspace);
-  file_menu->addAction("Apri cartella &area/lib...", this, &MainWindow::openArea);
-  file_menu->addAction("Apri &file area...", this, &MainWindow::openAreaFile);
+  file_menu->addAction("Gestione &workspace...", QKeySequence(QStringLiteral("Ctrl+Shift+W")),
+                       this, &MainWindow::manageWorkspaces);
+  file_menu->addAction("&Apri...", QKeySequence::Open, this, &MainWindow::openAny);
+  file_menu->addAction("Aggiungi area al workspace...", this, &MainWindow::addAreaToWorkspace);
+  file_menu->addSeparator();
   file_menu->addAction("&Salva", QKeySequence::Save, this, &MainWindow::saveArea);
   file_menu->addAction("Salva &come...", this, &MainWindow::saveAreaAs);
   file_menu->addSeparator();
@@ -244,13 +248,12 @@ void MainWindow::buildUi() {
   auto* tb = addToolBar("Main");
   tb->setMovable(false);
   tb->addAction("Nuova", this, &MainWindow::newArea);
-  tb->addAction("Apri workspace", this, &MainWindow::openWorkspace);
+  tb->addAction("Workspace", this, &MainWindow::manageWorkspaces);
   if(workspace_toggle_action_ != nullptr) {
     workspace_toggle_action_->setText(QStringLiteral("Aree"));
     tb->addAction(workspace_toggle_action_);
   }
-  tb->addAction("Apri area", this, &MainWindow::openArea);
-  tb->addAction("Apri file", this, &MainWindow::openAreaFile);
+  tb->addAction("Apri", this, &MainWindow::openAny);
   tb->addAction("Salva", this, &MainWindow::saveArea);
   tb->addSeparator();
   tb->addAction("+ Stanza", this, &MainWindow::addRoom);
@@ -676,8 +679,18 @@ void MainWindow::refreshWorkspaceList() {
 
     workspace_table_->setItem(
         row, 0, make_workspace_item(folder, folder.toLower(), path));
-    workspace_table_->setItem(
-        row, 1, make_workspace_item(zone_name, zone_name.toLower(), path));
+    if(area.zone_name.empty() && area.zone_num <= 0) {
+      auto* warn_item = make_workspace_item(
+          QStringLiteral("(manca %1.zon)").arg(folder), QString(), path);
+      warn_item->setForeground(QBrush(QColor(0xE0, 0x8A, 0x2E)));
+      warn_item->setToolTip(QStringLiteral(
+          "Il file .zon deve avere lo stesso nome della cartella (es. %1/%1.zon)")
+                                .arg(folder));
+      workspace_table_->setItem(row, 1, warn_item);
+    } else {
+      workspace_table_->setItem(
+          row, 1, make_workspace_item(zone_name, zone_name.toLower(), path));
+    }
     workspace_table_->setItem(
         row, 2, make_workspace_item(author, author.toLower(), path));
     workspace_table_->setItem(
@@ -711,27 +724,74 @@ void MainWindow::refreshWorkspaceList() {
   }
 }
 
-void MainWindow::loadWorkspace(const QString& path) {
-  const auto root = eleutheria::guess_workspace_root(path.toStdString());
-  if(!eleutheria::is_workspace_root(root)) {
-    throw std::runtime_error(
-        "Cartella non riconosciuta come workspace Aree:\n" + root.string() +
-        "\n\nApri la cartella che contiene le aree (es. Aree/ oppure Aree/src/).");
+void MainWindow::loadWorkspace(const QString& path, bool interactive) {
+  auto root = eleutheria::guess_workspace_root(path.toStdString());
+  std::error_code ec;
+  if(!std::filesystem::is_directory(root, ec)) {
+    throw std::runtime_error("Cartella workspace non trovata:\n" + root.string());
   }
   workspace_ = eleutheria::make_workspace(root);
   workspace_areas_ = eleutheria::scan_workspace_areas(*workspace_);
-  if(workspace_areas_.empty()) {
-    throw std::runtime_error("Nessuna area trovata in " + root.string());
-  }
-  saveLastWorkspacePath(QString::fromStdString(root.string()));
+  const QString root_q = QString::fromStdString(workspace_->root.string());
+  saveLastWorkspacePath(root_q);
+  eleutheria_ui::addKnownWorkspace(root_q);
   refreshWorkspaceList();
   rebuildWorkspaceIndex();
   updateTitle();
-  statusBar()->showMessage(
-      QString("Workspace: %1  (%2 aree) — doppio clic su un'area per aprirla")
-          .arg(QString::fromStdString(workspace_->root.string()))
-          .arg(workspace_areas_.size()),
-      10000);
+  if(workspace_areas_.empty()) {
+    statusBar()->showMessage(
+        QString("Workspace: %1  (vuoto) — File > Aggiungi area al workspace per inserire aree")
+            .arg(root_q),
+        15000);
+  } else {
+    statusBar()->showMessage(
+        QString("Workspace: %1  (%2 aree) — doppio clic su un'area per aprirla")
+            .arg(root_q)
+            .arg(workspace_areas_.size()),
+        10000);
+  }
+  const QString problems = areasWithNameProblems();
+  if(!problems.isEmpty()) {
+    if(interactive) {
+      QMessageBox box(this);
+      box.setIcon(QMessageBox::Warning);
+      box.setWindowTitle(QStringLiteral("Aree senza nome"));
+      box.setTextFormat(Qt::RichText);
+      box.setText(
+          QStringLiteral("Di alcune aree non riesco a leggere nome e numero di zona:<br><br>") +
+          problems +
+          QStringLiteral("<br>Il file .zon deve avere <b>lo stesso nome della cartella</b> "
+                         "(es. <tt>B1/B1.zon</tt>). Rinomina il file e riapri il workspace."));
+      box.exec();
+    } else {
+      statusBar()->showMessage(
+          QStringLiteral("Attenzione: alcune aree non hanno un file .zon con il nome della "
+                         "cartella (Gestione workspace > Apri per i dettagli)"),
+          15000);
+    }
+  }
+}
+
+QString MainWindow::areasWithNameProblems() const {
+  QString out;
+  for(const auto& area : workspace_areas_) {
+    if(!area.zone_name.empty() || area.zone_num > 0) {
+      continue;
+    }
+    const QString folder = QString::fromStdString(area.folder_name);
+    const QString dir = QString::fromStdString(area.path.string());
+    const QStringList zons = QDir(dir).entryList({QStringLiteral("*.zon")}, QDir::Files);
+    QString detail;
+    if(zons.isEmpty()) {
+      detail = QStringLiteral("manca il file <tt>%1.zon</tt>").arg(folder.toHtmlEscaped());
+    } else {
+      detail = QStringLiteral("trovato <tt>%1</tt>, dovrebbe chiamarsi <tt>%2.zon</tt>")
+                   .arg(zons.join(QStringLiteral(", ")).toHtmlEscaped(),
+                        folder.toHtmlEscaped());
+    }
+    out += QStringLiteral("&bull; <b>%1</b>: %2<br>").arg(folder.toHtmlEscaped(), detail);
+  }
+  return out;
 }
 
 void MainWindow::openAreaFromWorkspace(const QString& area_path) {
@@ -756,14 +816,57 @@ void MainWindow::saveLastWorkspacePath(const QString& path) {
 void MainWindow::restoreLastWorkspace() {
   QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
   const QString path = settings.value(QString::fromUtf8(kLastWorkspacePathKey)).toString();
-  if(path.isEmpty() || !QFileInfo::exists(path)) {
+  const bool first_launch = eleutheria_ui::knownWorkspaces().isEmpty();
+
+  if(path.isEmpty()) {
+    if(first_launch) {
+      showWorkspaceManager(QString());
+    }
+    return;
+  }
+  if(!QFileInfo(path).isDir()) {
+    showWorkspaceManager(
+        QStringLiteral("L'ultimo workspace usato non esiste piu':<br><tt>%1</tt><br>"
+                       "Forse la cartella e' stata spostata o rinominata. "
+                       "Scegline un altro o aggiungilo di nuovo.")
+            .arg(QDir::toNativeSeparators(path).toHtmlEscaped()));
     return;
   }
   try {
-    loadWorkspace(path);
-  } catch(const std::exception&) {
-    // Path vecchio o non valido: ignora in silenzio
+    loadWorkspace(path, false);
+  } catch(const std::exception& e) {
+    showWorkspaceManager(QString::fromUtf8(e.what()).toHtmlEscaped());
   }
+}
+
+void MainWindow::showWorkspaceManager(const QString& warning) {
+  const QString current =
+      workspace_ ? QString::fromStdString(workspace_->root.string()) : QString();
+  eleutheria_ui::WorkspaceManagerDialog dialog(this, current, warning);
+  if(dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+  switch(dialog.choice()) {
+    case eleutheria_ui::WorkspaceManagerDialog::Choice::OpenWorkspace:
+      if(!maybeSave()) {
+        return;
+      }
+      try {
+        loadWorkspace(dialog.chosenPath(), true);
+      } catch(const std::exception& e) {
+        QMessageBox::critical(this, "Errore workspace", QString::fromUtf8(e.what()));
+      }
+      break;
+    case eleutheria_ui::WorkspaceManagerDialog::Choice::OpenSample:
+      openPath(dialog.chosenPath());
+      break;
+    case eleutheria_ui::WorkspaceManagerDialog::Choice::None:
+      break;
+  }
+}
+
+void MainWindow::manageWorkspaces() {
+  showWorkspaceManager(QString());
 }
 
 void MainWindow::markDirty() {
@@ -824,6 +927,27 @@ void MainWindow::openPath(const QString& path) {
       loadWorkspace(path);
       return;
     }
+    // Cartella che non e' ne' workspace ne' area: spiega la regola.
+    if(std::filesystem::is_directory(fs_path) && !eleutheria::is_area_directory(fs_path) &&
+       !eleutheria::is_workspace_root(fs_path)) {
+      const bool empty =
+          QDir(path).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden).isEmpty();
+      QMessageBox box(this);
+      box.setIcon(empty ? QMessageBox::Question : QMessageBox::Warning);
+      box.setWindowTitle(QStringLiteral("Cartella senza aree"));
+      box.setTextFormat(Qt::RichText);
+      box.setText(
+          QStringLiteral("In <tt>%1</tt> non ho trovato ne' un'area ne' un workspace.<br><br>")
+              .arg(QDir::toNativeSeparators(path).toHtmlEscaped()) +
+          eleutheria_ui::workspaceRuleText() +
+          QStringLiteral("<br><br>Vuoi usare questa cartella come workspace (per ora vuoto)?"));
+      box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+      box.setDefaultButton(empty ? QMessageBox::Yes : QMessageBox::No);
+      if(box.exec() == QMessageBox::Yes) {
+        loadWorkspace(path, true);
+      }
+      return;
+    }
     // Singola area: se possibile aggancia anche il workspace parent.
     if(std::filesystem::is_directory(fs_path) && eleutheria::is_area_directory(fs_path)) {
       const auto ws_root = eleutheria::guess_workspace_root(fs_path);
@@ -859,48 +983,120 @@ void MainWindow::openPath(const QString& path) {
   }
 }
 
-void MainWindow::openWorkspace() {
-  const QString start = workspace_
-                            ? QString::fromStdString(workspace_->root.string())
-                            : (current_base_.isEmpty() ? QString()
-                                                       : QFileInfo(current_base_).absolutePath());
-  const QString path = eleutheria_ui::chooseExistingDirectory(
-      this, QStringLiteral("Apri workspace Aree (cartella con tutte le aree)"), start);
-  if(path.isEmpty()) {
-    return;
+void MainWindow::openAny() {
+  QString start;
+  if(!current_base_.isEmpty()) {
+    start = QFileInfo(current_base_).absolutePath();
+  } else if(workspace_) {
+    start = QString::fromStdString(workspace_->root.string());
   }
-  try {
-    if(!maybeSave()) {
-      return;
-    }
-    loadWorkspace(path);
-  } catch(const std::exception& e) {
-    QMessageBox::critical(this, "Errore workspace", QString::fromUtf8(e.what()));
-  }
-}
-
-void MainWindow::openArea() {
-  const QString start =
-      current_base_.isEmpty() ? QString() : QFileInfo(current_base_).absolutePath();
-  const QString path = eleutheria_ui::chooseExistingDirectory(
-      this, QStringLiteral("Apri cartella area / mudroot / lib"), start);
-  if(path.isEmpty()) {
-    return;
-  }
-  openPath(path);
-}
-
-void MainWindow::openAreaFile() {
-  const QString start =
-      current_base_.isEmpty() ? QString() : QFileInfo(current_base_).absolutePath();
-  const QString path = eleutheria_ui::chooseOpenFile(
-      this, QStringLiteral("Apri file area"),
+  const QString path = eleutheria_ui::chooseFileOrDirectory(
+      this,
+      QStringLiteral("Apri: un file area, una cartella area o un workspace"),
       QStringLiteral("Area Nebbie/Izanagi (*.ele *.wld *.mob *.obj *.zon *.shp);;Tutti (*)"),
       start);
   if(path.isEmpty()) {
     return;
   }
   openPath(path);
+}
+
+void MainWindow::addAreaToWorkspace() {
+  if(!workspace_) {
+    QMessageBox::information(
+        this, QStringLiteral("Nessun workspace aperto"),
+        QStringLiteral("Prima apri o crea un workspace (File > Gestione workspace)."));
+    return;
+  }
+  const QString file = eleutheria_ui::chooseOpenFile(
+      this, QStringLiteral("Scegli un file dell'area da aggiungere (verranno copiati tutti)"),
+      QStringLiteral("Area Nebbie/Izanagi (*.ele *.wld *.mob *.obj *.zon *.shp);;Tutti (*)"));
+  if(file.isEmpty()) {
+    return;
+  }
+  const QFileInfo picked(file);
+  const QString stem = picked.completeBaseName();
+  const QDir src_dir = picked.absoluteDir();
+  static const QStringList kExts = {QStringLiteral("zon"), QStringLiteral("wld"),
+                                    QStringLiteral("mob"), QStringLiteral("obj"),
+                                    QStringLiteral("shp"), QStringLiteral("ele")};
+  QStringList sources;
+  for(const auto& f : src_dir.entryList(QDir::Files)) {
+    const QFileInfo fi(src_dir.filePath(f));
+    if(fi.completeBaseName().compare(stem, Qt::CaseInsensitive) == 0 &&
+       kExts.contains(fi.suffix().toLower())) {
+      sources.append(fi.absoluteFilePath());
+    }
+  }
+  if(sources.isEmpty()) {
+    QMessageBox::warning(this, QStringLiteral("Nessun file area"),
+                         QStringLiteral("Accanto a %1 non ho trovato file area "
+                                        "(.zon .wld .mob .obj .shp .ele).")
+                             .arg(picked.fileName()));
+    return;
+  }
+
+  bool ok = false;
+  const QString name =
+      QInputDialog::getText(
+          this, QStringLiteral("Aggiungi area al workspace"),
+          QStringLiteral("Trovati %1 file: %2\n\nNome della cartella dell'area "
+                         "(i file verranno rinominati uguali):")
+              .arg(sources.size())
+              .arg([&]() {
+                QStringList n;
+                for(const auto& s : sources) n << QFileInfo(s).fileName();
+                return n.join(QStringLiteral(", "));
+              }()),
+          QLineEdit::Normal, stem, &ok)
+          .trimmed();
+  if(!ok || name.isEmpty()) {
+    return;
+  }
+  if(name.contains(QLatin1Char('/')) || name.contains(QLatin1Char('\\'))) {
+    QMessageBox::warning(this, QStringLiteral("Nome non valido"),
+                         QStringLiteral("Il nome non puo' contenere / o \\."));
+    return;
+  }
+  const QDir container(QString::fromStdString(workspace_->areas_container.string()));
+  const QString target = container.filePath(name);
+  if(QFileInfo::exists(target)) {
+    QMessageBox::warning(this, QStringLiteral("Esiste gia'"),
+                         QStringLiteral("Nel workspace c'e' gia' una cartella \"%1\".\n"
+                                        "Scegli un altro nome.")
+                             .arg(name));
+    return;
+  }
+  if(!QDir().mkpath(target)) {
+    QMessageBox::critical(this, QStringLiteral("Errore"),
+                          QStringLiteral("Non riesco a creare la cartella:\n%1")
+                              .arg(QDir::toNativeSeparators(target)));
+    return;
+  }
+  for(const auto& s : sources) {
+    const QString dest =
+        QDir(target).filePath(name + QLatin1Char('.') + QFileInfo(s).suffix().toLower());
+    if(!QFile::copy(s, dest)) {
+      QMessageBox::critical(this, QStringLiteral("Errore copia"),
+                            QStringLiteral("Copia non riuscita:\n%1\n->\n%2")
+                                .arg(QDir::toNativeSeparators(s), QDir::toNativeSeparators(dest)));
+      return;
+    }
+  }
+  try {
+    loadWorkspace(QString::fromStdString(workspace_->root.string()), true);
+  } catch(const std::exception& e) {
+    QMessageBox::critical(this, "Errore workspace", QString::fromUtf8(e.what()));
+    return;
+  }
+  const auto ans = QMessageBox::question(
+      this, QStringLiteral("Area aggiunta"),
+      QStringLiteral("Area \"%1\" aggiunta al workspace (%2 file copiati).\n\nAprirla ora?")
+          .arg(name)
+          .arg(sources.size()));
+  if(ans == QMessageBox::Yes) {
+    openPath(target);
+  }
 }
 
 void MainWindow::saveArea() {
