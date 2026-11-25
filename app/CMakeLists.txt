@@ -7,6 +7,12 @@ add_executable(izanagi
   main_window.cpp
   workspace_manager.cpp
   area_panel.cpp
+  project_store.cpp
+  project_store.hpp
+  project_panel.cpp
+  project_panel.hpp
+  workspace_tree.cpp
+  workspace_tree.hpp
   area_panel.hpp
   workspace_manager.hpp
   main_window.hpp

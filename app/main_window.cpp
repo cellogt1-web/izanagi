@@ -2,6 +2,9 @@
 
 #include "app_theme.hpp"
 #include "area_panel.hpp"
+#include "project_panel.hpp"
+#include "project_store.hpp"
+#include "workspace_tree.hpp"
 #include "editors.hpp"
 #include "file_dialogs.hpp"
 #include "workspace_manager.hpp"
@@ -36,6 +39,10 @@
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTreeWidgetItem>
+#include <QHash>
+#include <QSet>
+#include <QPoint>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolBar>
@@ -48,8 +55,7 @@
 namespace {
 
 constexpr int kWorkspaceColumnCount = 8;
-constexpr int kWorkspacePathRole = Qt::UserRole + 32;
-constexpr const char* kWorkspaceHeaderStateKey = "ui/workspaceHeaderState2";
+constexpr const char* kWorkspaceHeaderStateKey = "ui/workspaceHeaderState3";
 constexpr const char* kWorkspaceColumnVisibleKey = "ui/workspaceColumnVisible2";
 constexpr const char* kLastWorkspacePathKey = "ui/lastWorkspacePath";
 constexpr const char* kMaxLineLengthKey = "ui/maxLineLength";
@@ -64,34 +70,6 @@ const QStringList& workspace_column_labels() {
       QStringLiteral("Mob"),      QStringLiteral("Oggetti"),
   };
   return labels;
-}
-
-class SortableTableItem : public QTableWidgetItem {
- public:
-  using QTableWidgetItem::QTableWidgetItem;
-  bool operator<(const QTableWidgetItem& other) const override {
-    const QVariant a = data(Qt::UserRole);
-    const QVariant b = other.data(Qt::UserRole);
-    if(a.isValid() && b.isValid() && a.userType() == b.userType()) {
-      if(a.userType() == QMetaType::LongLong || a.userType() == QMetaType::Int) {
-        return a.toLongLong() < b.toLongLong();
-      }
-      return a.toString().localeAwareCompare(b.toString()) < 0;
-    }
-    return QTableWidgetItem::operator<(other);
-  }
-};
-
-SortableTableItem* make_workspace_item(const QString& text, const QVariant& sort_key,
-                                       const QString& path) {
-  auto* item = new SortableTableItem(text);
-  item->setData(Qt::UserRole, sort_key);
-  item->setData(kWorkspacePathRole, path);
-  item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  if(!path.isEmpty()) {
-    item->setToolTip(path);
-  }
-  return item;
 }
 
 QString strip_zone_author(QString name, QString* author_out) {
@@ -116,6 +94,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), catalog_(eleuther
   current_theme_ = load_saved_theme();
   applyCurrentTheme();
   loadMaxLineLength();
+  projects_ = new ProjectStore(this);
   buildUi();
   {
     QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
@@ -284,7 +263,9 @@ void MainWindow::buildUi() {
     workspace_dock_->show();
     area_placeholder_dock_->setFloating(false);
     addDockWidget(Qt::RightDockWidgetArea, area_placeholder_dock_);
-    for(auto* dock : area_docks_) {
+    std::vector<QDockWidget*> all = project_docks_;
+    all.insert(all.end(), area_docks_.begin(), area_docks_.end());
+    for(auto* dock : all) {
       dock->setFloating(false);
       addDockWidget(Qt::RightDockWidgetArea, dock);
       tabifyDockWidget(area_placeholder_dock_, dock);
@@ -331,6 +312,9 @@ QDockWidget* MainWindow::buildWorkspaceDock() {
       ->setToolTip(QStringLiteral("Apre l'area selezionata (oppure doppio clic)"));
   tb->addAction(QStringLiteral("Aggiungi area..."), this, &MainWindow::addAreaToWorkspace)
       ->setToolTip(QStringLiteral("Copia nel workspace un'area presa da un'altra cartella"));
+  tb->addAction(QStringLiteral("Nuovo progetto..."), this, &MainWindow::newProject)
+      ->setToolTip(QStringLiteral("Crea un progetto per raggruppare aree (solo organizzazione: "
+                                  "le aree non vengono modificate)"));
   tb->addAction(QStringLiteral("Aggiorna"), this, [this]() {
       if(workspace_) {
         try {
@@ -342,15 +326,13 @@ QDockWidget* MainWindow::buildWorkspaceDock() {
     })->setToolTip(QStringLiteral("Rilegge le aree dal disco"));
   layout->addWidget(tb);
 
-  workspace_table_ = new QTableWidget(0, kWorkspaceColumnCount, container);
-  workspace_table_->setHorizontalHeaderLabels(workspace_column_labels());
-  workspace_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
-  workspace_table_->setSelectionMode(QAbstractItemView::SingleSelection);
-  workspace_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  workspace_table_ = new ws_tree::Tree(container);
+  workspace_table_->setColumnCount(kWorkspaceColumnCount);
+  workspace_table_->setHeaderLabels(workspace_column_labels());
   workspace_table_->setAlternatingRowColors(true);
   workspace_table_->setSortingEnabled(true);
-  workspace_table_->verticalHeader()->setVisible(false);
-  auto* header = workspace_table_->horizontalHeader();
+  workspace_table_->setContextMenuPolicy(Qt::CustomContextMenu);
+  auto* header = workspace_table_->header();
   header->setStretchLastSection(true);
   header->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
   header->setSectionsMovable(true);
@@ -358,8 +340,9 @@ QDockWidget* MainWindow::buildWorkspaceDock() {
   header->setSortIndicatorShown(true);
   header->setSectionResizeMode(QHeaderView::Interactive);
   header->setMinimumSectionSize(48);
+  header->setSortIndicator(0, Qt::AscendingOrder);
   for(int col = 0; col < kWorkspaceColumnCount; ++col) {
-    header->resizeSection(col, col == 1 ? 180 : (col >= 3 ? 64 : 110));
+    header->resizeSection(col, col == 0 ? 150 : col == 1 ? 180 : (col >= 3 ? 64 : 110));
   }
   workspace_table_->setMinimumWidth(320);
   layout->addWidget(workspace_table_, 1);
@@ -369,9 +352,12 @@ QDockWidget* MainWindow::buildWorkspaceDock() {
   connect(header, &QHeaderView::sectionMoved, this, [this](int, int, int) {
     saveWorkspaceTableState();
   });
-  // Solo itemDoubleClicked: cellDoubleClicked + item(row,0) dopo sort apre l'area sbagliata.
-  connect(workspace_table_, &QTableWidget::itemDoubleClicked, this,
-          &MainWindow::onWorkspaceAreaActivated);
+  connect(workspace_table_, &QTreeWidget::itemDoubleClicked, this,
+          [this](QTreeWidgetItem* item, int) { onWorkspaceAreaActivated(item); });
+  connect(workspace_table_, &QWidget::customContextMenuRequested, this,
+          &MainWindow::showWorkspaceContextMenu);
+  connect(workspace_table_, &ws_tree::Tree::areasDropped, this,
+          &MainWindow::assignAreasToProject);
   return dock;
 }
 
@@ -500,7 +486,7 @@ void MainWindow::saveWorkspaceTableState() {
   }
   QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
   settings.setValue(QString::fromUtf8(kWorkspaceHeaderStateKey),
-                    workspace_table_->horizontalHeader()->saveState());
+                    workspace_table_->header()->saveState());
   QVariantList visible;
   visible.reserve(kWorkspaceColumnCount);
   for(int col = 0; col < kWorkspaceColumnCount; ++col) {
@@ -517,73 +503,143 @@ void MainWindow::restoreWorkspaceTableState() {
   const QByteArray state =
       settings.value(QString::fromUtf8(kWorkspaceHeaderStateKey)).toByteArray();
   if(!state.isEmpty()) {
-    workspace_table_->horizontalHeader()->restoreState(state);
+    workspace_table_->header()->restoreState(state);
   }
   // Allinea di nuovo a sinistra: restoreState puo' ripristinare allineamenti vecchi
-  workspace_table_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  workspace_table_->horizontalHeader()->setSectionsMovable(true);
+  workspace_table_->header()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  workspace_table_->header()->setSectionsMovable(true);
 }
 
 void MainWindow::refreshWorkspaceList() {
   if(workspace_table_ == nullptr) {
     return;
   }
+  ensureProjectsLoaded();
+
+  // Ricorda gruppi chiusi e selezione per non "saltare" a ogni aggiornamento.
+  QSet<QString> collapsed;
+  QStringList selected = workspace_table_->selectedAreaFolders();
+  for(int i = 0; i < workspace_table_->topLevelItemCount(); ++i) {
+    auto* g = workspace_table_->topLevelItem(i);
+    if(!g->isExpanded()) {
+      collapsed.insert(g->data(0, ws_tree::OrderRole).toString());
+    }
+  }
+
   const QSignalBlocker block(workspace_table_);
   workspace_table_->setSortingEnabled(false);
-  workspace_table_->setRowCount(0);
-  workspace_table_->setRowCount(static_cast<int>(workspace_areas_.size()));
+  workspace_table_->clear();
 
-  int row = 0;
+  QFont group_font = workspace_table_->font();
+  group_font.setBold(true);
+  QColor group_bg = palette().color(QPalette::Highlight);
+  group_bg.setAlpha(70);
+
+  auto make_group = [&](const QString& label, const QString& project, int kind,
+                        const QString& order) {
+    auto* g = new ws_tree::Item(workspace_table_);
+    g->setText(0, label);
+    g->setData(0, ws_tree::KindRole, kind);
+    g->setData(0, ws_tree::ProjectRole, project);
+    g->setData(0, ws_tree::OrderRole, order);
+    g->setFlags((g->flags() | Qt::ItemIsDropEnabled) & ~Qt::ItemIsDragEnabled);
+    for(int c = 0; c < kWorkspaceColumnCount; ++c) {
+      g->setFont(c, group_font);
+      g->setBackground(c, QBrush(group_bg));
+    }
+    g->setFirstColumnSpanned(true);
+    return g;
+  };
+
+  QHash<QString, ws_tree::Item*> groups;
+  const QStringList names = projects_->projectNames();
+  for(int i = 0; i < names.size(); ++i) {
+    auto* g = make_group(QString(), names[i], ws_tree::KindProject,
+                         QStringLiteral("0_%1").arg(i, 4, 10, QLatin1Char('0')));
+    g->setToolTip(0, QStringLiteral("Doppio clic: apre il pannello del progetto. "
+                                    "Trascina qui le aree per aggiungerle."));
+    groups.insert(names[i].toLower(), g);
+  }
+  auto* unassigned = make_group(QString(), QString(), ws_tree::KindUnassigned,
+                                QStringLiteral("9_"));
+  unassigned->setToolTip(0, QStringLiteral("Trascina qui un'area per toglierla dal progetto"));
+
+  QHash<ws_tree::Item*, int> group_counts;
   for(const auto& area : workspace_areas_) {
     QString author;
     const QString zone_name =
         strip_zone_author(QString::fromStdString(area.zone_name), &author);
     const QString path = QString::fromStdString(area.path.string());
     const QString folder = QString::fromStdString(area.folder_name);
+    const QString project = projects_->projectOf(folder);
+    ws_tree::Item* parent = project.isEmpty() ? unassigned : groups.value(project.toLower(), unassigned);
+    group_counts[parent] += 1;
 
-    workspace_table_->setItem(
-        row, 0, make_workspace_item(folder, folder.toLower(), path));
+    auto* item = new ws_tree::Item(parent);
+    item->setData(0, ws_tree::KindRole, ws_tree::KindArea);
+    item->setData(0, ws_tree::PathRole, path);
+    item->setData(0, ws_tree::FolderRole, folder);
+    item->setData(0, ws_tree::ProjectRole, project);
+    item->setFlags((item->flags() | Qt::ItemIsDragEnabled) & ~Qt::ItemIsDropEnabled);
+    auto set = [&](int col, const QString& text, const QVariant& sort, bool right = false) {
+      item->setText(col, text);
+      item->setData(col, ws_tree::SortRole, sort);
+      item->setToolTip(col, QDir::toNativeSeparators(path));
+      if(right) {
+        item->setTextAlignment(col, Qt::AlignRight | Qt::AlignVCenter);
+      }
+    };
+    set(0, folder, folder.toLower());
     if(area.zone_name.empty() && area.zone_num <= 0) {
-      auto* warn_item = make_workspace_item(
-          QStringLiteral("(manca %1.zon)").arg(folder), QString(), path);
-      warn_item->setForeground(QBrush(QColor(0xE0, 0x8A, 0x2E)));
-      warn_item->setToolTip(QStringLiteral(
-          "Il file .zon deve avere lo stesso nome della cartella (es. %1/%1.zon)")
-                                .arg(folder));
-      workspace_table_->setItem(row, 1, warn_item);
+      set(1, QStringLiteral("(manca %1.zon)").arg(folder), QString());
+      item->setForeground(1, QBrush(QColor(0xE0, 0x8A, 0x2E)));
+      item->setToolTip(1, QStringLiteral(
+                              "Il file .zon deve avere lo stesso nome della cartella (es. %1/%1.zon)")
+                              .arg(folder));
     } else {
-      workspace_table_->setItem(
-          row, 1, make_workspace_item(zone_name, zone_name.toLower(), path));
+      set(1, zone_name, zone_name.toLower());
     }
-    workspace_table_->setItem(
-        row, 2, make_workspace_item(author, author.toLower(), path));
-    workspace_table_->setItem(
-        row, 3,
-        make_workspace_item(area.zone_num > 0 ? QString::number(area.zone_num) : QString(),
-                            static_cast<qlonglong>(area.zone_num), path));
-    workspace_table_->setItem(
-        row, 4,
-        make_workspace_item(area.top_vnum > 0 ? QString::number(area.top_vnum) : QString(),
-                            static_cast<qlonglong>(area.top_vnum), path));
+    set(2, author, author.toLower());
+    set(3, area.zone_num > 0 ? QString::number(area.zone_num) : QString(),
+        static_cast<qlonglong>(area.zone_num), true);
+    set(4, area.top_vnum > 0 ? QString::number(area.top_vnum) : QString(),
+        static_cast<qlonglong>(area.top_vnum), true);
     const int counts[] = {area.room_count, area.mob_count, area.obj_count};
     for(int c = 0; c < 3; ++c) {
-      auto* item = make_workspace_item(counts[c] >= 0 ? QString::number(counts[c]) : QString(),
-                                       static_cast<qlonglong>(counts[c]), path);
-      item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-      workspace_table_->setItem(row, 5 + c, item);
+      set(5 + c, counts[c] >= 0 ? QString::number(counts[c]) : QString(),
+          static_cast<qlonglong>(counts[c]), true);
     }
-    ++row;
+    if(selected.contains(folder)) {
+      item->setSelected(true);
+    }
+  }
+
+  for(auto it = groups.begin(); it != groups.end(); ++it) {
+    const QString name = it.value()->data(0, ws_tree::ProjectRole).toString();
+    it.value()->setText(0, QStringLiteral("Progetto: %1   (%2 aree)")
+                               .arg(name)
+                               .arg(group_counts.value(it.value())));
+  }
+  unassigned->setText(0, QStringLiteral("Aree senza progetto   (%1)")
+                             .arg(group_counts.value(unassigned)));
+
+  for(int i = 0; i < workspace_table_->topLevelItemCount(); ++i) {
+    auto* g = workspace_table_->topLevelItem(i);
+    g->setExpanded(!collapsed.contains(g->data(0, ws_tree::OrderRole).toString()));
   }
 
   applyWorkspaceColumnVisibility();
   workspace_table_->setSortingEnabled(true);
-  workspace_table_->sortByColumn(0, Qt::AscendingOrder);
+  workspace_table_->sortByColumn(workspace_table_->header()->sortIndicatorSection() >= 0
+                                     ? workspace_table_->header()->sortIndicatorSection()
+                                     : 0,
+                                 workspace_table_->header()->sortIndicatorOrder());
 
   if(workspace_dock_) {
     workspace_dock_->show();
-    workspace_dock_->raise();
   }
   updateTitle();
+  refreshProjectPanels();
 }
 
 void MainWindow::loadWorkspace(const QString& path, bool interactive) {
@@ -656,11 +712,20 @@ QString MainWindow::areasWithNameProblems() const {
   return out;
 }
 
-void MainWindow::onWorkspaceAreaActivated(QTableWidgetItem* item) {
+void MainWindow::onWorkspaceAreaActivated(QTreeWidgetItem* item) {
   if(item == nullptr) {
     return;
   }
-  const QString path = item->data(kWorkspacePathRole).toString();
+  const int kind = item->data(0, ws_tree::KindRole).toInt();
+  if(kind == ws_tree::KindProject) {
+    openProjectPanel(item->data(0, ws_tree::ProjectRole).toString());
+    return;
+  }
+  if(kind == ws_tree::KindUnassigned) {
+    item->setExpanded(!item->isExpanded());
+    return;
+  }
+  const QString path = item->data(0, ws_tree::PathRole).toString();
   if(!path.isEmpty()) {
     openPath(path);
   }
@@ -731,6 +796,11 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if(panel != nullptr && !panel->maybeSave()) {
       event->ignore();
       return;
+    }
+  }
+  for(auto* dock : project_docks_) {
+    if(auto* pp = qobject_cast<ProjectPanel*>(dock->widget())) {
+      pp->flush();
     }
   }
   saveWorkspaceTableState();
@@ -974,15 +1044,7 @@ AreaPanel* MainWindow::addAreaPanel(eleutheria::Area area, const QString& base_p
   dock->setToolTip(QDir::toNativeSeparators(base_path));
   dock->installEventFilter(this);
 
-  // Si incastra con le altre aree aperte (a schede), o al posto del segnaposto.
-  QDockWidget* anchor = area_docks_.empty() ? area_placeholder_dock_ : area_docks_.back();
-  if(anchor != nullptr && !anchor->isFloating() &&
-     dockWidgetArea(anchor) != Qt::NoDockWidgetArea) {
-    addDockWidget(dockWidgetArea(anchor), dock);
-    tabifyDockWidget(anchor, dock);
-  } else {
-    addDockWidget(Qt::RightDockWidgetArea, dock);
-  }
+  placeContentDock(dock);
   area_docks_.push_back(dock);
 
   connect(panel, &AreaPanel::titleChanged, this, [this, panel, dock]() {
@@ -1103,13 +1165,17 @@ void MainWindow::updateAreaPlaceholder() {
   if(area_placeholder_dock_ == nullptr) {
     return;
   }
-  const bool show = area_docks_.empty() && area_toggle_action_ != nullptr &&
+  const bool show = area_docks_.empty() && project_docks_.empty() &&
+                    area_toggle_action_ != nullptr &&
                     area_toggle_action_->isChecked();
   area_placeholder_dock_->setVisible(show);
 }
 
 void MainWindow::setAreaWindowsVisible(bool visible) {
   for(auto* dock : area_docks_) {
+    dock->setVisible(visible);
+  }
+  for(auto* dock : project_docks_) {
     dock->setVisible(visible);
   }
   updateAreaPlaceholder();
@@ -1122,6 +1188,13 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
       if(dock == watched) {
         event->ignore();
         closeAreaPanel(qobject_cast<AreaPanel*>(dock->widget()));
+        return true;
+      }
+    }
+    for(auto* dock : project_docks_) {
+      if(dock == watched) {
+        event->ignore();
+        closeProjectPanel(qobject_cast<ProjectPanel*>(dock->widget()));
         return true;
       }
     }
@@ -1172,5 +1245,260 @@ void MainWindow::validateActiveArea() {
     panel->validate();
   } else {
     statusBar()->showMessage(QStringLiteral("Nessuna area aperta da validare."), 4000);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pannelli di contenuto (aree e progetti) e progetti
+// ---------------------------------------------------------------------------
+
+void MainWindow::placeContentDock(QDockWidget* dock) {
+  // Si incastra a schede con gli altri pannelli di contenuto, o al posto del segnaposto.
+  QDockWidget* anchor = nullptr;
+  if(!area_docks_.empty()) {
+    anchor = area_docks_.back();
+  } else if(!project_docks_.empty()) {
+    anchor = project_docks_.back();
+  } else {
+    anchor = area_placeholder_dock_;
+  }
+  if(anchor != nullptr && !anchor->isFloating() &&
+     dockWidgetArea(anchor) != Qt::NoDockWidgetArea) {
+    addDockWidget(dockWidgetArea(anchor), dock);
+    tabifyDockWidget(anchor, dock);
+  } else {
+    addDockWidget(Qt::RightDockWidgetArea, dock);
+  }
+}
+
+void MainWindow::ensureProjectsLoaded() {
+  const QString root = workspace_ ? QString::fromStdString(workspace_->root.string()) : QString();
+  if(root == projects_root_) {
+    return;
+  }
+  // Cambio workspace: i pannelli progetto del vecchio non valgono piu'.
+  const auto docks = project_docks_;
+  for(auto* dock : docks) {
+    closeProjectPanel(qobject_cast<ProjectPanel*>(dock->widget()));
+  }
+  projects_root_ = root;
+  if(root.isEmpty()) {
+    projects_->load(QString());
+    return;
+  }
+  QString error;
+  if(!projects_->load(root, &error)) {
+    QMessageBox::warning(this, QStringLiteral("Progetti"),
+                         QStringLiteral("Non riesco a leggere %1:\n%2")
+                             .arg(ProjectStore::fileName(), error));
+  }
+}
+
+QString MainWindow::askNewProjectName(const QString& initial) {
+  bool ok = false;
+  const QString name =
+      QInputDialog::getText(this, QStringLiteral("Progetto"),
+                            QStringLiteral("Nome del progetto:"), QLineEdit::Normal, initial, &ok)
+          .trimmed();
+  if(!ok || name.isEmpty()) {
+    return {};
+  }
+  if(projects_->find(name) != nullptr && name.compare(initial, Qt::CaseInsensitive) != 0) {
+    QMessageBox::warning(this, QStringLiteral("Progetto"),
+                         QStringLiteral("Esiste gia' un progetto \"%1\".").arg(name));
+    return {};
+  }
+  return name;
+}
+
+void MainWindow::newProject() {
+  if(!workspace_) {
+    QMessageBox::information(this, QStringLiteral("Progetti"),
+                             QStringLiteral("Prima apri un workspace."));
+    return;
+  }
+  ensureProjectsLoaded();
+  const QString name = askNewProjectName();
+  if(name.isEmpty()) {
+    return;
+  }
+  projects_->createProject(name);
+  // Se erano selezionate delle aree, le mette subito nel nuovo progetto.
+  const QStringList selected = workspace_table_->selectedAreaFolders();
+  if(!selected.isEmpty()) {
+    projects_->assignAreas(selected, name);
+  }
+  refreshWorkspaceList();
+}
+
+void MainWindow::assignAreasToProject(const QStringList& folders, const QString& project) {
+  if(folders.isEmpty()) {
+    return;
+  }
+  projects_->assignAreas(folders, project);
+  refreshWorkspaceList();
+  statusBar()->showMessage(
+      project.isEmpty()
+          ? QStringLiteral("%1 aree tolte dal progetto").arg(folders.size())
+          : QStringLiteral("%1 aree nel progetto \"%2\"").arg(folders.size()).arg(project),
+      4000);
+}
+
+void MainWindow::showWorkspaceContextMenu(const QPoint& pos) {
+  if(!workspace_) {
+    return;
+  }
+  ensureProjectsLoaded();
+  QTreeWidgetItem* item = workspace_table_->itemAt(pos);
+  const int kind = item ? item->data(0, ws_tree::KindRole).toInt() : 0;
+  QMenu menu(this);
+
+  if(kind == ws_tree::KindArea) {
+    if(!item->isSelected()) {
+      workspace_table_->clearSelection();
+      item->setSelected(true);
+    }
+    const QStringList folders = workspace_table_->selectedAreaFolders();
+    menu.addAction(QStringLiteral("Apri area"), this, [this, item]() {
+      onWorkspaceAreaActivated(item);
+    });
+    menu.addSeparator();
+    auto* assign = menu.addMenu(folders.size() > 1
+                                    ? QStringLiteral("Assegna %1 aree a progetto").arg(folders.size())
+                                    : QStringLiteral("Assegna a progetto"));
+    const QString current = item->data(0, ws_tree::ProjectRole).toString();
+    for(const auto& name : projects_->projectNames()) {
+      auto* a = assign->addAction(name, this, [this, folders, name]() {
+        assignAreasToProject(folders, name);
+      });
+      if(folders.size() == 1 && name.compare(current, Qt::CaseInsensitive) == 0) {
+        a->setCheckable(true);
+        a->setChecked(true);
+      }
+    }
+    if(!projects_->projectNames().isEmpty()) {
+      assign->addSeparator();
+    }
+    assign->addAction(QStringLiteral("Nuovo progetto..."), this, [this, folders]() {
+      const QString name = askNewProjectName();
+      if(!name.isEmpty()) {
+        projects_->createProject(name);
+        assignAreasToProject(folders, name);
+      }
+    });
+    if(!current.isEmpty() || folders.size() > 1) {
+      menu.addAction(QStringLiteral("Togli dal progetto"), this, [this, folders]() {
+        assignAreasToProject(folders, QString());
+      });
+    }
+  } else if(kind == ws_tree::KindProject) {
+    const QString name = item->data(0, ws_tree::ProjectRole).toString();
+    menu.addAction(QStringLiteral("Apri progetto"), this, [this, name]() {
+      openProjectPanel(name);
+    });
+    menu.addSeparator();
+    menu.addAction(QStringLiteral("Rinomina progetto..."), this, [this, name]() {
+      const QString new_name = askNewProjectName(name);
+      if(new_name.isEmpty() || new_name == name) {
+        return;
+      }
+      if(auto* panel = findProjectPanel(name)) {
+        panel->flush();
+      }
+      projects_->renameProject(name, new_name);
+      if(auto* panel = findProjectPanel(name)) {
+        panel->setProjectName(new_name);
+        if(auto* dock = qobject_cast<QDockWidget*>(panel->parentWidget())) {
+          dock->setWindowTitle(QStringLiteral("Progetto: %1").arg(new_name));
+        }
+      }
+      refreshWorkspaceList();
+    });
+    menu.addAction(QStringLiteral("Elimina progetto..."), this, [this, name]() {
+      const auto ans = QMessageBox::question(
+          this, QStringLiteral("Elimina progetto"),
+          QStringLiteral("Eliminare il progetto \"%1\"?\n\nLe sue aree NON vengono toccate: "
+                         "finiscono in \"Aree senza progetto\". Si perdono descrizione, note "
+                         "e to-do del progetto.")
+              .arg(name));
+      if(ans != QMessageBox::Yes) {
+        return;
+      }
+      if(auto* panel = findProjectPanel(name)) {
+        closeProjectPanel(panel);
+      }
+      projects_->deleteProject(name);
+      refreshWorkspaceList();
+    });
+  } else {
+    menu.addAction(QStringLiteral("Nuovo progetto..."), this, &MainWindow::newProject);
+  }
+  menu.exec(workspace_table_->viewport()->mapToGlobal(pos));
+}
+
+ProjectPanel* MainWindow::findProjectPanel(const QString& name) const {
+  for(auto* dock : project_docks_) {
+    auto* panel = qobject_cast<ProjectPanel*>(dock->widget());
+    if(panel != nullptr && panel->projectName().compare(name, Qt::CaseInsensitive) == 0) {
+      return panel;
+    }
+  }
+  return nullptr;
+}
+
+void MainWindow::openProjectPanel(const QString& name) {
+  if(name.isEmpty()) {
+    return;
+  }
+  if(auto* open = findProjectPanel(name)) {
+    if(auto* dock = qobject_cast<QDockWidget*>(open->parentWidget())) {
+      dock->show();
+      dock->raise();
+    }
+    return;
+  }
+  auto* panel = new ProjectPanel(projects_, name);
+  auto* dock = new QDockWidget(QStringLiteral("Progetto: %1").arg(name), this);
+  dock->setObjectName(QStringLiteral("projectDock_%1").arg(++area_dock_counter_));
+  dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
+                    QDockWidget::DockWidgetFloatable);
+  dock->setWidget(panel);
+  placeContentDock(dock);
+  project_docks_.push_back(dock);
+  connect(panel, &ProjectPanel::openAreaRequested, this, &MainWindow::openPath);
+  connect(panel, &ProjectPanel::closeRequested, this, [this, panel]() {
+    closeProjectPanel(panel);
+  });
+  panel->refresh(workspace_areas_);
+  if(!area_toggle_action_->isChecked()) {
+    area_toggle_action_->setChecked(true);
+  }
+  dock->show();
+  dock->raise();
+  updateAreaPlaceholder();
+}
+
+void MainWindow::closeProjectPanel(ProjectPanel* panel) {
+  if(panel == nullptr) {
+    return;
+  }
+  panel->flush();
+  for(auto it = project_docks_.begin(); it != project_docks_.end(); ++it) {
+    if((*it)->widget() == panel) {
+      QDockWidget* dock = *it;
+      project_docks_.erase(it);
+      removeDockWidget(dock);
+      dock->deleteLater();
+      break;
+    }
+  }
+  updateAreaPlaceholder();
+}
+
+void MainWindow::refreshProjectPanels() {
+  for(auto* dock : project_docks_) {
+    if(auto* panel = qobject_cast<ProjectPanel*>(dock->widget())) {
+      panel->refresh(workspace_areas_);
+    }
   }
 }

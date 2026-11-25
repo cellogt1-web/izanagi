@@ -17,6 +17,9 @@ struct WorkspaceArea {
   int room_count = -1;
   int mob_count = -1;
   int obj_count = -1;
+  /** Vnum piu' basso e piu' alto usati da stanze/mob/oggetti (0 = nessuno). */
+  int used_vnum_min = 0;
+  int used_vnum_max = 0;
 };
 
 struct Workspace {

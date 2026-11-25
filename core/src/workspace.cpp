@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <regex>
 
@@ -9,7 +10,7 @@ namespace eleutheria {
 namespace {
 
 // Conta le righe "#vnum" (record) di un file .wld/.mob/.obj; -1 se il file manca.
-int count_records(const std::filesystem::path& file) {
+int count_records(const std::filesystem::path& file, int* vmin = nullptr, int* vmax = nullptr) {
   std::ifstream in(file, std::ios::binary);
   if(!in) {
     return -1;
@@ -38,6 +39,13 @@ int count_records(const std::filesystem::path& file) {
       continue;  // terminatore
     }
     ++count;
+    const int v = std::atoi(line.c_str() + 1);
+    if(vmin != nullptr && (*vmin == 0 || v < *vmin)) {
+      *vmin = v;
+    }
+    if(vmax != nullptr && v > *vmax) {
+      *vmax = v;
+    }
   }
   return count;
 }
@@ -201,9 +209,11 @@ std::vector<WorkspaceArea> scan_workspace_areas(const Workspace& workspace) {
     {
       const bool sub = info.path.filename() == "area" && info.path != entry.path();
       const std::string stem = sub ? std::string("area") : info.folder_name;
-      info.room_count = count_records(info.path / (stem + ".wld"));
-      info.mob_count = count_records(info.path / (stem + ".mob"));
-      info.obj_count = count_records(info.path / (stem + ".obj"));
+      int* lo = &info.used_vnum_min;
+      int* hi = &info.used_vnum_max;
+      info.room_count = count_records(info.path / (stem + ".wld"), lo, hi);
+      info.mob_count = count_records(info.path / (stem + ".mob"), lo, hi);
+      info.obj_count = count_records(info.path / (stem + ".obj"), lo, hi);
     }
     areas.push_back(std::move(info));
   }

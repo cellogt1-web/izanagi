@@ -111,6 +111,8 @@ const char* dark_qss() {
     QDockWidget > QWidget { font-weight: normal; background: #1e1e1e; }
     QTableView, QListView, QTreeView { background: #1e1e1e; border: none; gridline-color: #2a2a2d; selection-background-color: #094771; }
 
+    QListView::indicator { width: 13px; height: 13px; border: 1px solid #8a8a90; border-radius: 2px; background: #1e1e1e; }
+    QListView::indicator:checked { background: #007acc; border-color: #3ea0e8; }
     QStatusBar { background: #007acc; color: #fff; }
   )";
 }

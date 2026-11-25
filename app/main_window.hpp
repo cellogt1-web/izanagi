@@ -15,8 +15,12 @@
 class QAction;
 class QActionGroup;
 class QMenu;
-class QTableWidget;
-class QTableWidgetItem;
+class QTreeWidgetItem;
+class ProjectStore;
+class ProjectPanel;
+namespace ws_tree {
+class Tree;
+}
 class QLabel;
 class QDockWidget;
 class AreaPanel;
@@ -48,7 +52,8 @@ class MainWindow : public QMainWindow {
   void validateActiveArea();
   void about();
 
-  void onWorkspaceAreaActivated(QTableWidgetItem* item);
+  void onWorkspaceAreaActivated(QTreeWidgetItem* item);
+  void newProject();
   void setTheme(AppTheme theme);
   void setWorkspaceColumnVisible(int logical_column, bool visible);
   void editLineLengthLimit();
@@ -82,6 +87,17 @@ class MainWindow : public QMainWindow {
   void setActivePanel(AreaPanel* panel);
   AreaPanel* activePanel() const;
   void updateAreaPlaceholder();
+  void placeContentDock(QDockWidget* dock);
+
+  // Progetti
+  void ensureProjectsLoaded();
+  void showWorkspaceContextMenu(const QPoint& pos);
+  void assignAreasToProject(const QStringList& folders, const QString& project);
+  QString askNewProjectName(const QString& initial = QString());
+  void openProjectPanel(const QString& name);
+  ProjectPanel* findProjectPanel(const QString& name) const;
+  void closeProjectPanel(ProjectPanel* panel);
+  void refreshProjectPanels();
   void setAreaWindowsVisible(bool visible);
 
   eleutheria::Catalog catalog_;
@@ -91,7 +107,10 @@ class MainWindow : public QMainWindow {
   eleutheria::WorkspaceEntityIndex workspace_index_;
   bool workspace_index_ready_ = false;
 
-  QTableWidget* workspace_table_ = nullptr;
+  ws_tree::Tree* workspace_table_ = nullptr;
+  ProjectStore* projects_ = nullptr;
+  QString projects_root_;
+  std::vector<QDockWidget*> project_docks_;
   QDockWidget* workspace_dock_ = nullptr;
   QDockWidget* area_placeholder_dock_ = nullptr;
   QAction* workspace_toggle_action_ = nullptr;
