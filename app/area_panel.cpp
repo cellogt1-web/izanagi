@@ -19,6 +19,14 @@
 #include <QToolBar>
 #include <QVBoxLayout>
 
+namespace {
+// Indici delle schede del pannello area (ordine di addTab in buildUi).
+constexpr int kTabZone = 0;
+constexpr int kTabRooms = 1;
+constexpr int kTabMobs = 2;
+constexpr int kTabObjs = 3;
+}  // namespace
+
 AreaPanel::AreaPanel(const eleutheria::Catalog& catalog, eleutheria::Area area,
                      const QString& base_path, QWidget* parent)
     : QWidget(parent), catalog_(catalog), area_(std::move(area)), base_path_(base_path) {
@@ -29,6 +37,10 @@ AreaPanel::AreaPanel(const eleutheria::Catalog& catalog, eleutheria::Area area,
   spe_editor_->load(area_.specials);
   applyWorkspaceIndexToEditors();
   refreshLists();
+  // La scheda Zone e' la prima: mostra subito i dati generali dell'area.
+  if(zone_list_->count() > 0) {
+    zone_list_->setCurrentRow(0);
+  }
 }
 
 QString AreaPanel::folderName() const {
@@ -117,27 +129,28 @@ void AreaPanel::buildUi() {
     applyCurrentEditor();
     if(kind == QLatin1Char('R') && area_.rooms.count(vnum)) {
       current_room_ = vnum;
-      tabs_->setCurrentIndex(0);
+      tabs_->setCurrentIndex(kTabRooms);
       refreshLists();
       room_editor_->setArea(&area_);
       room_editor_->load(area_.rooms.at(vnum));
     } else if(kind == QLatin1Char('M') && area_.mobiles.count(vnum)) {
       current_mob_ = vnum;
-      tabs_->setCurrentIndex(1);
+      tabs_->setCurrentIndex(kTabMobs);
       refreshLists();
       mob_editor_->load(area_.mobiles.at(vnum));
     } else if(kind == QLatin1Char('O') && area_.objects.count(vnum)) {
       current_obj_ = vnum;
-      tabs_->setCurrentIndex(2);
+      tabs_->setCurrentIndex(kTabObjs);
       refreshLists();
       obj_editor_->load(area_.objects.at(vnum));
     }
   });
 
+  // Ordine: Zone (dati generali dell'area) per prima, poi i contenuti.
+  tabs_->addTab(make_page(&zone_list_, zone_editor_), QStringLiteral("Zone"));
   tabs_->addTab(make_page(&room_list_, room_editor_), QStringLiteral("Stanze"));
   tabs_->addTab(make_page(&mob_list_, mob_editor_), QStringLiteral("Mob"));
   tabs_->addTab(make_page(&obj_list_, obj_editor_), QStringLiteral("Oggetti"));
-  tabs_->addTab(make_page(&zone_list_, zone_editor_), QStringLiteral("Zone"));
   tabs_->addTab(spe_editor_, QStringLiteral("Special"));
 
   connect(room_list_, &QListWidget::currentRowChanged, this, &AreaPanel::onRoomSelected);
@@ -503,7 +516,7 @@ void AreaPanel::addRoom() {
   refreshLists();
   room_editor_->setArea(&area_);
   room_editor_->load(area_.rooms.at(vnum));
-  tabs_->setCurrentIndex(0);
+  tabs_->setCurrentIndex(kTabRooms);
 }
 
 void AreaPanel::addMob() {
@@ -522,7 +535,7 @@ void AreaPanel::addMob() {
   markDirty();
   refreshLists();
   mob_editor_->load(area_.mobiles.at(vnum));
-  tabs_->setCurrentIndex(1);
+  tabs_->setCurrentIndex(kTabMobs);
 }
 
 void AreaPanel::addObj() {
@@ -540,27 +553,27 @@ void AreaPanel::addObj() {
   markDirty();
   refreshLists();
   obj_editor_->load(area_.objects.at(vnum));
-  tabs_->setCurrentIndex(2);
+  tabs_->setCurrentIndex(kTabObjs);
 }
 
 void AreaPanel::deleteCurrent() {
   const int tab = tabs_->currentIndex();
-  if(tab == 0 && current_room_) {
+  if(tab == kTabRooms && current_room_) {
     area_.dirty_rooms.erase(*current_room_);
     area_.rooms.erase(*current_room_);
     current_room_.reset();
     room_editor_->clear();
-  } else if(tab == 1 && current_mob_) {
+  } else if(tab == kTabMobs && current_mob_) {
     area_.dirty_mobs.erase(*current_mob_);
     area_.mobiles.erase(*current_mob_);
     current_mob_.reset();
     mob_editor_->clear();
-  } else if(tab == 2 && current_obj_) {
+  } else if(tab == kTabObjs && current_obj_) {
     area_.dirty_objects.erase(*current_obj_);
     area_.objects.erase(*current_obj_);
     current_obj_.reset();
     obj_editor_->clear();
-  } else if(tab == 3 && current_zone_) {
+  } else if(tab == kTabZone && current_zone_) {
     area_.dirty_zones.erase(*current_zone_);
     area_.zones.erase(*current_zone_);
     current_zone_.reset();
