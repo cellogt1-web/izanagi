@@ -2109,13 +2109,15 @@ eleutheria::Zone ZoneEditor::save() const {
 
 SpeEditor::SpeEditor(QWidget* parent) : QWidget(parent) {
   auto* root = new QVBoxLayout(this);
-  root->addWidget(new QLabel(
+  auto* help = new QLabel(
       QStringLiteral(
           "Special .spe: M/O/R + vnum + nome (anche fittizio) + parms opzionali. "
           "Il vnum puo' essere di questa area, di un'altra area del workspace, "
           "oppure un placeholder numerico. "
           "Il server assegna la procedura solo se il nome esiste a runtime."),
-      this));
+      this);
+  help->setWordWrap(true);  // senza: il pannello area diventa largo 1350px
+  root->addWidget(help);
   table_ = new QTableWidget(0, 4, this);
   table_->setHorizontalHeaderLabels(
       {QStringLiteral("Tipo"), QStringLiteral("Vnum"), QStringLiteral("Nome"),

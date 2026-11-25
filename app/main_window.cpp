@@ -47,10 +47,10 @@
 
 namespace {
 
-constexpr int kWorkspaceColumnCount = 6;
+constexpr int kWorkspaceColumnCount = 8;
 constexpr int kWorkspacePathRole = Qt::UserRole + 32;
-constexpr const char* kWorkspaceHeaderStateKey = "ui/workspaceHeaderState";
-constexpr const char* kWorkspaceColumnVisibleKey = "ui/workspaceColumnVisible";
+constexpr const char* kWorkspaceHeaderStateKey = "ui/workspaceHeaderState2";
+constexpr const char* kWorkspaceColumnVisibleKey = "ui/workspaceColumnVisible2";
 constexpr const char* kLastWorkspacePathKey = "ui/lastWorkspacePath";
 constexpr const char* kMaxLineLengthKey = "ui/maxLineLength";
 constexpr const char* kWindowGeometryKey = "ui/mainWindowGeometry";
@@ -59,8 +59,9 @@ constexpr int kWindowStateVersion = 2;
 
 const QStringList& workspace_column_labels() {
   static const QStringList labels = {
-      QStringLiteral("Cartella"), QStringLiteral("Nome"), QStringLiteral("Autore"),
-      QStringLiteral("Zona"),     QStringLiteral("Da"),   QStringLiteral("A"),
+      QStringLiteral("Cartella"), QStringLiteral("Nome"),   QStringLiteral("Autore"),
+      QStringLiteral("Zona"),     QStringLiteral("Top vnum"), QStringLiteral("Stanze"),
+      QStringLiteral("Mob"),      QStringLiteral("Oggetti"),
   };
   return labels;
 }
@@ -246,7 +247,7 @@ void MainWindow::buildUi() {
   placeholder->setTextFormat(Qt::RichText);
   area_placeholder_dock_->setWidget(placeholder);
   addDockWidget(Qt::RightDockWidgetArea, area_placeholder_dock_);
-  resizeDocks({workspace_dock_, area_placeholder_dock_}, {420, 760}, Qt::Horizontal);
+  resizeDocks({workspace_dock_, area_placeholder_dock_}, {620, 760}, Qt::Horizontal);
 
   // ---------- Menu Visualizza ----------
   auto* view_menu = menuBar()->addMenu(QStringLiteral("&Visualizza"));
@@ -358,7 +359,7 @@ QDockWidget* MainWindow::buildWorkspaceDock() {
   header->setSectionResizeMode(QHeaderView::Interactive);
   header->setMinimumSectionSize(48);
   for(int col = 0; col < kWorkspaceColumnCount; ++col) {
-    header->resizeSection(col, col == 1 ? 180 : 90);
+    header->resizeSection(col, col == 1 ? 180 : (col >= 3 ? 64 : 110));
   }
   workspace_table_->setMinimumWidth(320);
   layout->addWidget(workspace_table_, 1);
@@ -562,13 +563,15 @@ void MainWindow::refreshWorkspaceList() {
                             static_cast<qlonglong>(area.zone_num), path));
     workspace_table_->setItem(
         row, 4,
-        make_workspace_item(
-            area.bottom_vnum > 0 ? QString::number(area.bottom_vnum) : QString(),
-            static_cast<qlonglong>(area.bottom_vnum), path));
-    workspace_table_->setItem(
-        row, 5,
         make_workspace_item(area.top_vnum > 0 ? QString::number(area.top_vnum) : QString(),
                             static_cast<qlonglong>(area.top_vnum), path));
+    const int counts[] = {area.room_count, area.mob_count, area.obj_count};
+    for(int c = 0; c < 3; ++c) {
+      auto* item = make_workspace_item(counts[c] >= 0 ? QString::number(counts[c]) : QString(),
+                                       static_cast<qlonglong>(counts[c]), path);
+      item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+      workspace_table_->setItem(row, 5 + c, item);
+    }
     ++row;
   }
 
@@ -1004,6 +1007,13 @@ AreaPanel* MainWindow::addAreaPanel(eleutheria::Area area, const QString& base_p
   dock->show();
   dock->raise();
   updateAreaPlaceholder();
+  // Dopo il layout: evita che il pannello workspace resti schiacciato.
+  QTimer::singleShot(0, this, [this]() {
+    if(workspace_dock_ != nullptr && workspace_dock_->isVisible() &&
+       !workspace_dock_->isFloating() && workspace_dock_->width() < 520) {
+      resizeDocks({workspace_dock_}, {620}, Qt::Horizontal);
+    }
+  });
   setActivePanel(panel);
   return panel;
 }

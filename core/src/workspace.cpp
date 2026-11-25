@@ -8,6 +8,40 @@
 namespace eleutheria {
 namespace {
 
+// Conta le righe "#vnum" (record) di un file .wld/.mob/.obj; -1 se il file manca.
+int count_records(const std::filesystem::path& file) {
+  std::ifstream in(file, std::ios::binary);
+  if(!in) {
+    return -1;
+  }
+  int count = 0;
+  std::string line;
+  while(std::getline(in, line)) {
+    if(line.size() < 2 || line[0] != '#') {
+      continue;
+    }
+    std::size_t i = 1;
+    while(i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) {
+      ++i;
+    }
+    if(i == 1) {
+      continue;
+    }
+    std::size_t j = i;
+    while(j < line.size() && std::isspace(static_cast<unsigned char>(line[j]))) {
+      ++j;
+    }
+    if(j != line.size()) {
+      continue;
+    }
+    if(line.compare(1, i - 1, "99999") == 0) {
+      continue;  // terminatore
+    }
+    ++count;
+  }
+  return count;
+}
+
 bool is_reserved_folder(const std::string& name) {
   if(name.empty() || name[0] == '.') {
     return true;
@@ -163,6 +197,13 @@ std::vector<WorkspaceArea> scan_workspace_areas(const Workspace& workspace) {
       read_zone_header(info.path, info.zone_num, info.zone_name, info.top_vnum);
     } else {
       read_zone_header(entry.path(), info.zone_num, info.zone_name, info.top_vnum);
+    }
+    {
+      const bool sub = info.path.filename() == "area" && info.path != entry.path();
+      const std::string stem = sub ? std::string("area") : info.folder_name;
+      info.room_count = count_records(info.path / (stem + ".wld"));
+      info.mob_count = count_records(info.path / (stem + ".mob"));
+      info.obj_count = count_records(info.path / (stem + ".obj"));
     }
     areas.push_back(std::move(info));
   }

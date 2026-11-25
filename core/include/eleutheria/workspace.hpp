@@ -13,6 +13,10 @@ struct WorkspaceArea {
   std::string zone_name;
   int top_vnum = 0;
   int bottom_vnum = 0;
+  /** Conteggi letti dai file .wld/.mob/.obj (-1 = file assente). */
+  int room_count = -1;
+  int mob_count = -1;
+  int obj_count = -1;
 };
 
 struct Workspace {
