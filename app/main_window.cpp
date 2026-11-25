@@ -1,6 +1,7 @@
 #include "main_window.hpp"
 
 #include "app_theme.hpp"
+#include "area_panel.hpp"
 #include "editors.hpp"
 #include "file_dialogs.hpp"
 #include "workspace_manager.hpp"
@@ -14,6 +15,7 @@
 #include <QCloseEvent>
 #include <QColor>
 #include <QDockWidget>
+#include <QEvent>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -51,6 +53,9 @@ constexpr const char* kWorkspaceHeaderStateKey = "ui/workspaceHeaderState";
 constexpr const char* kWorkspaceColumnVisibleKey = "ui/workspaceColumnVisible";
 constexpr const char* kLastWorkspacePathKey = "ui/lastWorkspacePath";
 constexpr const char* kMaxLineLengthKey = "ui/maxLineLength";
+constexpr const char* kWindowGeometryKey = "ui/mainWindowGeometry";
+constexpr const char* kWindowStateKey = "ui/mainWindowState";
+constexpr int kWindowStateVersion = 2;
 
 const QStringList& workspace_column_labels() {
   static const QStringList labels = {
@@ -109,10 +114,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), catalog_(eleuther
   resize(1180, 760);
   current_theme_ = load_saved_theme();
   applyCurrentTheme();
-  buildUi();
   loadMaxLineLength();
-  applyMaxLineLength();
-  newArea();
+  buildUi();
+  {
+    QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
+    restoreGeometry(settings.value(QString::fromUtf8(kWindowGeometryKey)).toByteArray());
+    restoreState(settings.value(QString::fromUtf8(kWindowStateKey)).toByteArray(),
+                 kWindowStateVersion);
+  }
+  updateAreaPlaceholder();
+  updateStatusCounts();
+  qApp->installEventFilter(this);
   // Dopo show()/event loop: su macOS Intel setOverrideCursor nel costruttore
   // crasha in CGImageCreate (Qt WaitCursor). Anche l'indice e' lavoro pesante.
   QTimer::singleShot(0, this, &MainWindow::restoreLastWorkspace);
@@ -154,14 +166,10 @@ void MainWindow::saveMaxLineLength() {
 }
 
 void MainWindow::applyMaxLineLength() {
-  if(room_editor_ != nullptr) {
-    room_editor_->setMaxLineLength(max_line_length_);
-  }
-  if(mob_editor_ != nullptr) {
-    mob_editor_->setMaxLineLength(max_line_length_);
-  }
-  if(obj_editor_ != nullptr) {
-    obj_editor_->setMaxLineLength(max_line_length_);
+  for(auto* dock : area_docks_) {
+    if(auto* panel = qobject_cast<AreaPanel*>(dock->widget())) {
+      panel->setMaxLineLength(max_line_length_);
+    }
   }
 }
 
@@ -189,36 +197,68 @@ void MainWindow::editLineLengthLimit() {
 }
 
 void MainWindow::buildUi() {
-  auto* file_menu = menuBar()->addMenu("&File");
-  file_menu->addAction("&Nuova area", QKeySequence::New, this, &MainWindow::newArea);
-  file_menu->addAction("Gestione &workspace...", QKeySequence(QStringLiteral("Ctrl+Shift+W")),
-                       this, &MainWindow::manageWorkspaces);
-  file_menu->addAction("&Apri...", QKeySequence::Open, this, &MainWindow::openAny);
-  file_menu->addAction("Aggiungi area al workspace...", this, &MainWindow::addAreaToWorkspace);
-  file_menu->addSeparator();
-  file_menu->addAction("&Salva", QKeySequence::Save, this, &MainWindow::saveArea);
-  file_menu->addAction("Salva &come...", this, &MainWindow::saveAreaAs);
-  file_menu->addSeparator();
-  file_menu->addAction("&Esci", QKeySequence::Quit, this, &QWidget::close);
+  setDockNestingEnabled(true);
+  setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks |
+                 QMainWindow::AllowTabbedDocks | QMainWindow::GroupedDragging);
+  setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
+  // Il centro resta vuoto: tutto lo spazio va ai pannelli (struttura modulare).
+  auto* center = new QWidget(this);
+  center->setMaximumSize(0, 0);
+  setCentralWidget(center);
 
-  auto* view_menu = menuBar()->addMenu("&Visualizza");
-  view_menu->addAction("Stanze", this, [this]() { tabs_->setCurrentIndex(0); });
-  view_menu->addAction("Mob", this, [this]() { tabs_->setCurrentIndex(1); });
-  view_menu->addAction("Oggetti", this, [this]() { tabs_->setCurrentIndex(2); });
-  view_menu->addAction("Zone", this, [this]() { tabs_->setCurrentIndex(3); });
-  view_menu->addAction("Special", this, [this]() { tabs_->setCurrentIndex(4); });
-  view_menu->addSeparator();
-  workspace_toggle_action_ =
-      view_menu->addAction(QStringLiteral("Aree workspace"), this, [this]() {
-        if(workspace_dock_ == nullptr) {
-          return;
-        }
-        workspace_dock_->setVisible(!workspace_dock_->isVisible());
-      });
-  workspace_toggle_action_->setCheckable(true);
+  // ---------- Menu File ----------
+  auto* file_menu = menuBar()->addMenu(QStringLiteral("&File"));
+  file_menu->addAction(QStringLiteral("Gestione &workspace..."),
+                       QKeySequence(QStringLiteral("Ctrl+Shift+W")), this,
+                       &MainWindow::manageWorkspaces);
+  file_menu->addAction(QStringLiteral("&Apri..."), QKeySequence::Open, this, &MainWindow::openAny);
+  file_menu->addAction(QStringLiteral("&Nuova area"), QKeySequence::New, this,
+                       &MainWindow::newArea);
+  file_menu->addAction(QStringLiteral("Aggiungi area al workspace..."), this,
+                       &MainWindow::addAreaToWorkspace);
+  file_menu->addSeparator();
+  file_menu->addAction(QStringLiteral("&Salva area"), QKeySequence::Save, this,
+                       &MainWindow::saveActiveArea);
+  file_menu->addAction(QStringLiteral("Salva area &come..."), this, &MainWindow::saveActiveAreaAs);
+  file_menu->addAction(QStringLiteral("Salva &tutto"), QKeySequence(QStringLiteral("Ctrl+Shift+S")),
+                       this, &MainWindow::saveAllAreas);
+  file_menu->addAction(QStringLiteral("C&hiudi area"), QKeySequence(QStringLiteral("Ctrl+W")), this,
+                       &MainWindow::closeActiveArea);
+  file_menu->addSeparator();
+  file_menu->addAction(QStringLiteral("&Esci"), QKeySequence::Quit, this, &QWidget::close);
+
+  // ---------- Pannelli ----------
+  workspace_dock_ = buildWorkspaceDock();
+  addDockWidget(Qt::LeftDockWidgetArea, workspace_dock_);
+
+  area_placeholder_dock_ = new QDockWidget(QStringLiteral("Edit area"), this);
+  area_placeholder_dock_->setObjectName(QStringLiteral("areaPlaceholderDock"));
+  area_placeholder_dock_->setFeatures(QDockWidget::DockWidgetMovable |
+                                      QDockWidget::DockWidgetFloatable);
+  auto* placeholder = new QLabel(
+      QStringLiteral("<div style='font-size:15px'><b>Nessuna area aperta</b></div><br>"
+                     "Doppio clic su un'area nel pannello <b>Workspace</b>,<br>"
+                     "oppure <b>File &rarr; Apri...</b> / <b>Nuova area</b>.<br><br>"
+                     "Puoi aprire piu' aree insieme: ognuna ha il suo pannello,<br>"
+                     "che puoi spostare, affiancare o staccare su un altro schermo."),
+      area_placeholder_dock_);
+  placeholder->setAlignment(Qt::AlignCenter);
+  placeholder->setTextFormat(Qt::RichText);
+  area_placeholder_dock_->setWidget(placeholder);
+  addDockWidget(Qt::RightDockWidgetArea, area_placeholder_dock_);
+  resizeDocks({workspace_dock_, area_placeholder_dock_}, {420, 760}, Qt::Horizontal);
+
+  // ---------- Menu Visualizza ----------
+  auto* view_menu = menuBar()->addMenu(QStringLiteral("&Visualizza"));
+  workspace_toggle_action_ = workspace_dock_->toggleViewAction();
+  workspace_toggle_action_->setText(QStringLiteral("Finestra workspace"));
   workspace_toggle_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")));
-  workspace_toggle_action_->setStatusTip(
-      QStringLiteral("Mostra/nascondi il pannello aree (Ctrl+Shift+A)"));
+  view_menu->addAction(workspace_toggle_action_);
+  area_toggle_action_ = view_menu->addAction(QStringLiteral("Finestre edit area"));
+  area_toggle_action_->setCheckable(true);
+  area_toggle_action_->setChecked(true);
+  area_toggle_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+  connect(area_toggle_action_, &QAction::toggled, this, &MainWindow::setAreaWindowsVisible);
   view_menu->addSeparator();
   auto* theme_menu = view_menu->addMenu(QStringLiteral("Tema"));
   theme_group_ = new QActionGroup(this);
@@ -235,42 +275,73 @@ void MainWindow::buildUi() {
     connect(action, &QAction::triggered, this, [this, theme]() { setTheme(theme); });
   }
   setupWorkspaceColumnsMenu(view_menu);
+  applyWorkspaceColumnVisibility();
+  view_menu->addSeparator();
+  view_menu->addAction(QStringLiteral("Ripristina disposizione pannelli"), this, [this]() {
+    workspace_dock_->setFloating(false);
+    addDockWidget(Qt::LeftDockWidgetArea, workspace_dock_);
+    workspace_dock_->show();
+    area_placeholder_dock_->setFloating(false);
+    addDockWidget(Qt::RightDockWidgetArea, area_placeholder_dock_);
+    for(auto* dock : area_docks_) {
+      dock->setFloating(false);
+      addDockWidget(Qt::RightDockWidgetArea, dock);
+      tabifyDockWidget(area_placeholder_dock_, dock);
+      dock->show();
+    }
+    area_toggle_action_->setChecked(true);
+    updateAreaPlaceholder();
+    resizeDocks({workspace_dock_, area_placeholder_dock_}, {420, width() - 420},
+                Qt::Horizontal);
+  });
 
-  auto* tools_menu = menuBar()->addMenu("&Strumenti");
-  tools_menu->addAction("&Valida area", this, &MainWindow::validateArea);
-  tools_menu->addAction("Applica modifiche editor", this, &MainWindow::applyCurrentEditor);
+  // ---------- Menu Strumenti ----------
+  auto* tools_menu = menuBar()->addMenu(QStringLiteral("&Strumenti"));
+  tools_menu->addAction(QStringLiteral("&Valida area"), this, &MainWindow::validateActiveArea);
   tools_menu->addSeparator();
-  tools_menu->addAction("Limite caratteri per &riga...", this, &MainWindow::editLineLengthLimit);
+  tools_menu->addAction(QStringLiteral("Limite caratteri per &riga..."), this,
+                        &MainWindow::editLineLengthLimit);
 
-  auto* help_menu = menuBar()->addMenu("&?");
-  help_menu->addAction("Informazioni su Izanagi...", this, &MainWindow::about);
+  auto* help_menu = menuBar()->addMenu(QStringLiteral("&?"));
+  help_menu->addAction(QStringLiteral("Informazioni su Izanagi..."), this, &MainWindow::about);
 
-  auto* tb = addToolBar("Main");
-  tb->setMovable(false);
-  tb->addAction("Nuova", this, &MainWindow::newArea);
-  tb->addAction("Workspace", this, &MainWindow::manageWorkspaces);
-  if(workspace_toggle_action_ != nullptr) {
-    workspace_toggle_action_->setText(QStringLiteral("Aree"));
-    tb->addAction(workspace_toggle_action_);
-  }
-  tb->addAction("Apri", this, &MainWindow::openAny);
-  tb->addAction("Salva", this, &MainWindow::saveArea);
-  tb->addSeparator();
-  tb->addAction("+ Stanza", this, &MainWindow::addRoom);
-  tb->addAction("+ Mob", this, &MainWindow::addMob);
-  tb->addAction("+ Oggetto", this, &MainWindow::addObj);
-  tb->addAction("Elimina", this, &MainWindow::deleteCurrent);
-  tb->addSeparator();
-  tb->addAction("Valida", this, &MainWindow::validateArea);
+  status_counts_ = new QLabel(this);
+  statusBar()->addWidget(status_counts_, 1);
+}
 
-  tabs_ = new QTabWidget(this);
-  setCentralWidget(tabs_);
+QDockWidget* MainWindow::buildWorkspaceDock() {
+  auto* dock = new QDockWidget(QStringLiteral("Workspace"), this);
+  dock->setObjectName(QStringLiteral("workspaceDock"));
+  dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
+                    QDockWidget::DockWidgetFloatable);
 
-  workspace_dock_ = new QDockWidget(QStringLiteral("Aree (workspace)"), this);
-  workspace_dock_->setObjectName(QStringLiteral("workspaceDock"));
-  workspace_dock_->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
-                               QDockWidget::DockWidgetFloatable);
-  workspace_table_ = new QTableWidget(0, kWorkspaceColumnCount, workspace_dock_);
+  auto* container = new QWidget(dock);
+  auto* layout = new QVBoxLayout(container);
+  layout->setContentsMargins(0, 0, 0, 0);
+  layout->setSpacing(0);
+
+  // Barra comandi del pannello Workspace
+  auto* tb = new QToolBar(container);
+  tb->setObjectName(QStringLiteral("workspaceToolbar"));
+  tb->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  tb->addAction(QStringLiteral("Gestione..."), this, &MainWindow::manageWorkspaces)
+      ->setToolTip(QStringLiteral("Elenco dei workspace: apri, crea, aggiungi"));
+  tb->addAction(QStringLiteral("Apri area"), this, &MainWindow::openSelectedWorkspaceArea)
+      ->setToolTip(QStringLiteral("Apre l'area selezionata (oppure doppio clic)"));
+  tb->addAction(QStringLiteral("Aggiungi area..."), this, &MainWindow::addAreaToWorkspace)
+      ->setToolTip(QStringLiteral("Copia nel workspace un'area presa da un'altra cartella"));
+  tb->addAction(QStringLiteral("Aggiorna"), this, [this]() {
+      if(workspace_) {
+        try {
+          loadWorkspace(QString::fromStdString(workspace_->root.string()), false);
+        } catch(const std::exception& e) {
+          QMessageBox::critical(this, "Errore workspace", QString::fromUtf8(e.what()));
+        }
+      }
+    })->setToolTip(QStringLiteral("Rilegge le aree dal disco"));
+  layout->addWidget(tb);
+
+  workspace_table_ = new QTableWidget(0, kWorkspaceColumnCount, container);
   workspace_table_->setHorizontalHeaderLabels(workspace_column_labels());
   workspace_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
   workspace_table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -289,282 +360,74 @@ void MainWindow::buildUi() {
   for(int col = 0; col < kWorkspaceColumnCount; ++col) {
     header->resizeSection(col, col == 1 ? 180 : 90);
   }
-  workspace_table_->setMinimumWidth(420);
-  workspace_dock_->setWidget(workspace_table_);
-  addDockWidget(Qt::LeftDockWidgetArea, workspace_dock_);
-  workspace_dock_->hide();
+  workspace_table_->setMinimumWidth(320);
+  layout->addWidget(workspace_table_, 1);
+  dock->setWidget(container);
+
   restoreWorkspaceTableState();
-  applyWorkspaceColumnVisibility();
   connect(header, &QHeaderView::sectionMoved, this, [this](int, int, int) {
     saveWorkspaceTableState();
   });
-  if(workspace_toggle_action_ != nullptr) {
-    workspace_toggle_action_->setChecked(false);
-    connect(workspace_dock_, &QDockWidget::visibilityChanged, workspace_toggle_action_,
-            &QAction::setChecked);
-  }
   // Solo itemDoubleClicked: cellDoubleClicked + item(row,0) dopo sort apre l'area sbagliata.
   connect(workspace_table_, &QTableWidget::itemDoubleClicked, this,
           &MainWindow::onWorkspaceAreaActivated);
-
-  auto make_page = [&](QListWidget** list, QWidget* editor) {
-    auto* page = new QWidget(this);
-    auto* split = new QSplitter(Qt::Horizontal, page);
-    *list = new QListWidget(split);
-    (*list)->setMinimumWidth(240);
-    auto* right = new QWidget(split);
-    auto* right_layout = new QVBoxLayout(right);
-    right_layout->setContentsMargins(4, 4, 4, 4);
-    right_layout->addWidget(editor);
-    split->addWidget(*list);
-    split->addWidget(right);
-    split->setStretchFactor(1, 1);
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(split);
-    return page;
-  };
-
-  room_editor_ = new RoomEditor(catalog_, this);
-  mob_editor_ = new MobEditor(catalog_, this);
-  obj_editor_ = new ObjEditor(catalog_, this);
-  zone_editor_ = new ZoneEditor(this);
-  spe_editor_ = new SpeEditor(this);
-  connect(room_editor_, &RoomEditor::areaResetsChanged, this, [this]() {
-    markDirty();
-    if(current_room_ && area_) {
-      area_->dirty_rooms.insert(*current_room_);
-    }
-    if(area_) {
-      // I reset vivono nella zona: marca tutte le zone (di solito una)
-      for(const auto& [num, _] : area_->zones) {
-        area_->dirty_zones.insert(num);
-      }
-    }
-    if(current_zone_ && area_ && area_->zones.count(*current_zone_)) {
-      zone_editor_->load(area_->zones.at(*current_zone_));
-    }
-  });
-  connect(room_editor_, &RoomEditor::navigateRequested, this,
-          [this](QChar kind, qint64 vnum) {
-            if(!area_) {
-              return;
-            }
-            applyCurrentEditor();
-            if(kind == QLatin1Char('R') && area_->rooms.count(vnum)) {
-              current_room_ = vnum;
-              tabs_->setCurrentIndex(0);
-              refreshLists();
-              room_editor_->setArea(&*area_);
-              room_editor_->load(area_->rooms.at(vnum));
-            } else if(kind == QLatin1Char('M') && area_->mobiles.count(vnum)) {
-              current_mob_ = vnum;
-              tabs_->setCurrentIndex(1);
-              refreshLists();
-              mob_editor_->load(area_->mobiles.at(vnum));
-            } else if(kind == QLatin1Char('O') && area_->objects.count(vnum)) {
-              current_obj_ = vnum;
-              tabs_->setCurrentIndex(2);
-              refreshLists();
-              obj_editor_->load(area_->objects.at(vnum));
-            }
-          });
-
-  tabs_->addTab(make_page(&room_list_, room_editor_), "Stanze");
-  tabs_->addTab(make_page(&mob_list_, mob_editor_), "Mob");
-  tabs_->addTab(make_page(&obj_list_, obj_editor_), "Oggetti");
-  tabs_->addTab(make_page(&zone_list_, zone_editor_), "Zone");
-  tabs_->addTab(spe_editor_, "Special");
-
-  connect(room_list_, &QListWidget::currentRowChanged, this, &MainWindow::onRoomSelected);
-  connect(mob_list_, &QListWidget::currentRowChanged, this, &MainWindow::onMobSelected);
-  connect(obj_list_, &QListWidget::currentRowChanged, this, &MainWindow::onObjSelected);
-  connect(zone_list_, &QListWidget::currentRowChanged, this, &MainWindow::onZoneSelected);
-
-  connect(room_editor_, &RoomEditor::edited, this, [this]() {
-    markDirty();
-    if(current_room_ && area_) {
-      area_->dirty_rooms.insert(*current_room_);
-    }
-  });
-  connect(mob_editor_, &MobEditor::edited, this, [this]() {
-    markDirty();
-    if(current_mob_ && area_) {
-      area_->dirty_mobs.insert(*current_mob_);
-    }
-  });
-  connect(obj_editor_, &ObjEditor::edited, this, [this]() {
-    markDirty();
-    if(current_obj_ && area_) {
-      area_->dirty_objects.insert(*current_obj_);
-    }
-  });
-  connect(zone_editor_, &ZoneEditor::edited, this, [this]() {
-    markDirty();
-    if(current_zone_ && area_) {
-      area_->dirty_zones.insert(*current_zone_);
-    }
-  });
-  connect(spe_editor_, &SpeEditor::edited, this, &MainWindow::onSpeEdited);
-
-  status_counts_ = new QLabel(this);
-  statusBar()->addWidget(status_counts_, 1);
-}
-
-void MainWindow::setArea(eleutheria::Area area) {
-  area_ = std::move(area);
-  current_room_.reset();
-  current_mob_.reset();
-  current_obj_.reset();
-  current_zone_.reset();
-  room_editor_->setArea(&*area_);
-  if(spe_editor_ != nullptr) {
-    spe_editor_->setArea(&*area_);
-    spe_editor_->load(area_->specials);
-  }
-  applyWorkspaceIndexToEditors();
-  refreshLists();
-  updateTitle();
-}
-
-QString MainWindow::currentAreaFolderName() const {
-  if(current_base_.isEmpty()) {
-    return {};
-  }
-  return QFileInfo(current_base_).fileName();
+  return dock;
 }
 
 void MainWindow::rebuildWorkspaceIndex() {
   workspace_index_.clear();
   workspace_index_ready_ = false;
-  if(!workspace_ || workspace_areas_.empty()) {
-    applyWorkspaceIndexToEditors();
-    return;
-  }
-  statusBar()->showMessage(
-      QStringLiteral("Indicizzazione workspace (%1 aree)...").arg(workspace_areas_.size()));
-  // Non usare QApplication::setOverrideCursor: su macOS Intel (Qt 6.11 + cocoa)
-  // puo' crashare in QImage::toCGImage / CGImageCreate, soprattutto all'avvio.
-  try {
-    workspace_index_.build_from_workspace(*workspace_, workspace_areas_);
-    workspace_index_ready_ = true;
-  } catch(...) {
-    workspace_index_.clear();
-    workspace_index_ready_ = false;
-  }
-  applyWorkspaceIndexToEditors();
-  statusBar()->showMessage(
-      QStringLiteral("Indice workspace: %1 mob, %2 obj, %3 stanze")
-          .arg(workspace_index_.mobiles.size())
-          .arg(workspace_index_.objects.size())
-          .arg(workspace_index_.rooms.size()),
-      8000);
-}
-
-void MainWindow::applyWorkspaceIndexToEditors() {
-  const QString folder = currentAreaFolderName();
-  if(area_ && workspace_index_ready_) {
-    workspace_index_.overlay_area(*area_, folder.toStdString());
-  }
-  const eleutheria::WorkspaceEntityIndex* idx =
-      workspace_index_ready_ ? &workspace_index_ : nullptr;
-  if(room_editor_ != nullptr) {
-    room_editor_->setWorkspaceIndex(idx, folder);
-  }
-  if(spe_editor_ != nullptr) {
-    spe_editor_->setWorkspaceIndex(idx, folder);
-    spe_editor_->setArea(area_ ? &*area_ : nullptr);
-  }
-}
-
-void MainWindow::refreshLists() {
-  if(!area_) {
-    return;
-  }
-  const QSignalBlocker block_rooms(room_list_);
-  const QSignalBlocker block_mobs(mob_list_);
-  const QSignalBlocker block_objs(obj_list_);
-  const QSignalBlocker block_zones(zone_list_);
-
-  const QFont mono(QStringLiteral("Menlo"), 11);
-  room_list_->setFont(mono);
-  mob_list_->setFont(mono);
-  obj_list_->setFont(mono);
-  zone_list_->setFont(mono);
-  room_list_->setUniformItemSizes(true);
-  mob_list_->setUniformItemSizes(true);
-  obj_list_->setUniformItemSizes(true);
-  zone_list_->setUniformItemSizes(true);
-
-  room_list_->clear();
-  for(const auto& [vnum, room] : area_->rooms) {
-    auto* item = new QListWidgetItem(QString::fromStdString(eleutheria::room_list_label(room)));
-    item->setData(Qt::UserRole, QVariant::fromValue(static_cast<qint64>(vnum)));
-    item->setToolTip(QString::fromStdString(room.name));
-    room_list_->addItem(item);
-  }
-  mob_list_->clear();
-  for(const auto& [vnum, mob] : area_->mobiles) {
-    auto* item = new QListWidgetItem(QString::fromStdString(eleutheria::mob_list_label(mob)));
-    item->setData(Qt::UserRole, QVariant::fromValue(static_cast<qint64>(vnum)));
-    mob_list_->addItem(item);
-  }
-  obj_list_->clear();
-  for(const auto& [vnum, obj] : area_->objects) {
-    auto* item = new QListWidgetItem(QString::fromStdString(eleutheria::obj_list_label(obj)));
-    item->setData(Qt::UserRole, QVariant::fromValue(static_cast<qint64>(vnum)));
-    obj_list_->addItem(item);
-  }
-  zone_list_->clear();
-  for(const auto& [num, zone] : area_->zones) {
-    auto* item = new QListWidgetItem(QString::fromStdString(eleutheria::zone_list_label(zone)));
-    item->setData(Qt::UserRole, num);
-    zone_list_->addItem(item);
-  }
-
-  auto select_by_id = [](QListWidget* list, qint64 id) {
-    for(int i = 0; i < list->count(); ++i) {
-      if(list->item(i)->data(Qt::UserRole).toLongLong() == id) {
-        list->setCurrentRow(i);
-        return;
-      }
+  if(workspace_ && !workspace_areas_.empty()) {
+    statusBar()->showMessage(
+        QStringLiteral("Indicizzazione workspace (%1 aree)...").arg(workspace_areas_.size()));
+    // Non usare QApplication::setOverrideCursor: su macOS Intel (Qt 6.11 + cocoa)
+    // puo' crashare in QImage::toCGImage / CGImageCreate, soprattutto all'avvio.
+    try {
+      workspace_index_.build_from_workspace(*workspace_, workspace_areas_);
+      workspace_index_ready_ = true;
+    } catch(...) {
+      workspace_index_.clear();
+      workspace_index_ready_ = false;
     }
-  };
-  if(current_room_) {
-    select_by_id(room_list_, *current_room_);
+    statusBar()->showMessage(
+        QStringLiteral("Indice workspace: %1 mob, %2 obj, %3 stanze")
+            .arg(workspace_index_.mobiles.size())
+            .arg(workspace_index_.objects.size())
+            .arg(workspace_index_.rooms.size()),
+        8000);
   }
-  if(current_mob_) {
-    select_by_id(mob_list_, *current_mob_);
+  for(auto* dock : area_docks_) {
+    if(auto* panel = qobject_cast<AreaPanel*>(dock->widget())) {
+      panel->setWorkspaceIndex(&workspace_index_, workspace_index_ready_);
+    }
   }
-  if(current_obj_) {
-    select_by_id(obj_list_, *current_obj_);
-  }
-  if(current_zone_) {
-    select_by_id(zone_list_, *current_zone_);
-  }
-
-  status_counts_->setText(
-      QString("Stanze: %1   Mob: %2   Oggetti: %3   Zone: %4   Shop: %5   Spe: %6")
-          .arg(area_->rooms.size())
-          .arg(area_->mobiles.size())
-          .arg(area_->objects.size())
-          .arg(area_->zones.size())
-          .arg(area_->shops.size())
-          .arg(area_->specials.size()));
 }
 
 void MainWindow::updateTitle() {
-  QString title = "Izanagi (Nebbie Arcane)";
+  QString title = QStringLiteral("Izanagi (Nebbie Arcane)");
   if(workspace_) {
-    title += " [" + QString::fromStdString(workspace_->root.filename().string()) + "]";
+    title += QStringLiteral(" [") + QString::fromStdString(workspace_->root.filename().string()) +
+             QStringLiteral("]");
   }
-  if(area_) {
-    title += " - " + QString::fromStdString(area_->meta.name);
-    if(area_->dirty) {
-      title += " *";
-    }
+  if(auto* panel = activePanel()) {
+    title += QStringLiteral(" - ") + panel->displayName();
   }
   setWindowTitle(title);
+  if(workspace_dock_ != nullptr) {
+    workspace_dock_->setWindowTitle(
+        workspace_ ? QStringLiteral("Workspace: %1 (%2 aree)")
+                         .arg(QString::fromStdString(workspace_->root.filename().string()))
+                         .arg(workspace_areas_.size())
+                   : QStringLiteral("Workspace (nessuno aperto)"));
+  }
+}
+
+void MainWindow::updateStatusCounts() {
+  if(status_counts_ == nullptr) {
+    return;
+  }
+  auto* panel = activePanel();
+  status_counts_->setText(panel ? panel->countsText() : QStringLiteral("Nessuna area aperta"));
 }
 
 void MainWindow::setupWorkspaceColumnsMenu(QMenu* parent_menu) {
@@ -714,14 +577,10 @@ void MainWindow::refreshWorkspaceList() {
   workspace_table_->sortByColumn(0, Qt::AscendingOrder);
 
   if(workspace_dock_) {
-    workspace_dock_->setWindowTitle(
-        QStringLiteral("Aree (%1)").arg(workspace_areas_.size()));
     workspace_dock_->show();
     workspace_dock_->raise();
-    if(workspace_toggle_action_ != nullptr) {
-      workspace_toggle_action_->setChecked(true);
-    }
   }
+  updateTitle();
 }
 
 void MainWindow::loadWorkspace(const QString& path, bool interactive) {
@@ -794,17 +653,13 @@ QString MainWindow::areasWithNameProblems() const {
   return out;
 }
 
-void MainWindow::openAreaFromWorkspace(const QString& area_path) {
-  openPath(area_path);
-}
-
 void MainWindow::onWorkspaceAreaActivated(QTableWidgetItem* item) {
   if(item == nullptr) {
     return;
   }
   const QString path = item->data(kWorkspacePathRole).toString();
   if(!path.isEmpty()) {
-    openAreaFromWorkspace(path);
+    openPath(path);
   }
 }
 
@@ -848,9 +703,6 @@ void MainWindow::showWorkspaceManager(const QString& warning) {
   }
   switch(dialog.choice()) {
     case eleutheria_ui::WorkspaceManagerDialog::Choice::OpenWorkspace:
-      if(!maybeSave()) {
-        return;
-      }
       try {
         loadWorkspace(dialog.chosenPath(), true);
       } catch(const std::exception& e) {
@@ -869,54 +721,33 @@ void MainWindow::manageWorkspaces() {
   showWorkspaceManager(QString());
 }
 
-void MainWindow::markDirty() {
-  if(area_) {
-    area_->dirty = true;
-    updateTitle();
-  }
-}
-
-bool MainWindow::maybeSave() {
-  if(!area_ || !area_->dirty) {
-    return true;
-  }
-  const auto ans = QMessageBox::question(
-      this, "Salvare?", "L'area ha modifiche non salvate. Salvare?",
-      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
-  if(ans == QMessageBox::Cancel) {
-    return false;
-  }
-  if(ans == QMessageBox::Save) {
-    saveArea();
-    return !area_->dirty;
-  }
-  return true;
-}
-
 void MainWindow::closeEvent(QCloseEvent* event) {
-  if(maybeSave()) {
-    saveWorkspaceTableState();
-    event->accept();
-  } else {
-    event->ignore();
+  const auto docks = area_docks_;
+  for(auto* dock : docks) {
+    auto* panel = qobject_cast<AreaPanel*>(dock->widget());
+    if(panel != nullptr && !panel->maybeSave()) {
+      event->ignore();
+      return;
+    }
   }
+  saveWorkspaceTableState();
+  QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
+  settings.setValue(QString::fromUtf8(kWindowGeometryKey), saveGeometry());
+  settings.setValue(QString::fromUtf8(kWindowStateKey), saveState(kWindowStateVersion));
+  event->accept();
 }
 
 void MainWindow::newArea() {
-  if(!maybeSave()) {
-    return;
-  }
   eleutheria::Area area;
   area.meta.name = "Nuova area";
   area.meta.author = "";
   area.meta.mud_id = "nebbie";
   area.dirty = false;
-  current_base_.clear();
-  setArea(std::move(area));
+  addAreaPanel(std::move(area), QString());
 }
 
 void MainWindow::openPath(const QString& path) {
-  if(path.isEmpty() || !maybeSave()) {
+  if(path.isEmpty()) {
     return;
   }
   try {
@@ -948,29 +779,36 @@ void MainWindow::openPath(const QString& path) {
       }
       return;
     }
-    // Singola area: se possibile aggancia anche il workspace parent.
-    if(std::filesystem::is_directory(fs_path) && eleutheria::is_area_directory(fs_path)) {
+
+    const auto loaded = eleutheria::load_area(path.toStdString());
+    const QString base = QString::fromStdString(loaded.area.base_path);
+
+    // Gia' aperta? Porta in primo piano il suo pannello.
+    if(auto* open = findOpenArea(base)) {
+      if(auto* dock = qobject_cast<QDockWidget*>(open->parentWidget())) {
+        dock->show();
+        dock->raise();
+      }
+      setActivePanel(open);
+      statusBar()->showMessage(QStringLiteral("Area gia' aperta: %1").arg(open->displayName()),
+                               5000);
+      return;
+    }
+
+    // Singola area senza workspace aperto: aggancia il workspace che la contiene.
+    if(!workspace_ && std::filesystem::is_directory(fs_path) &&
+       eleutheria::is_area_directory(fs_path)) {
       const auto ws_root = eleutheria::guess_workspace_root(fs_path);
       if(eleutheria::is_workspace_root(ws_root)) {
         workspace_ = eleutheria::make_workspace(ws_root);
         workspace_areas_ = eleutheria::scan_workspace_areas(*workspace_);
         refreshWorkspaceList();
+        rebuildWorkspaceIndex();
       }
     }
 
-    const auto loaded = eleutheria::load_area(path.toStdString());
-    current_base_ = QString::fromStdString(loaded.area.base_path);
-    auto area = loaded.area;
-    area.dirty = false;
-    setArea(std::move(area));
-    statusBar()->showMessage(
-        QString("Aperto: %1  (%2 stanze, %3 mob, %4 obj, %5 zone)")
-            .arg(current_base_)
-            .arg(area_->rooms.size())
-            .arg(area_->mobiles.size())
-            .arg(area_->objects.size())
-            .arg(area_->zones.size()),
-        8000);
+    auto* panel = addAreaPanel(loaded.area, base);
+    statusBar()->showMessage(QStringLiteral("Aperto: %1").arg(panel->countsText()), 8000);
     if(!loaded.warnings.empty()) {
       QString msg;
       for(const auto& w : loaded.warnings) {
@@ -985,8 +823,8 @@ void MainWindow::openPath(const QString& path) {
 
 void MainWindow::openAny() {
   QString start;
-  if(!current_base_.isEmpty()) {
-    start = QFileInfo(current_base_).absolutePath();
+  if(auto* panel = activePanel(); panel != nullptr && !panel->basePath().isEmpty()) {
+    start = QFileInfo(panel->basePath()).absolutePath();
   } else if(workspace_) {
     start = QString::fromStdString(workspace_->root.string());
   }
@@ -1099,90 +937,6 @@ void MainWindow::addAreaToWorkspace() {
   }
 }
 
-void MainWindow::saveArea() {
-  if(!area_) {
-    return;
-  }
-  applyCurrentEditor();
-  refreshLists();
-  if(current_base_.isEmpty()) {
-    saveAreaAs();
-    return;
-  }
-  try {
-    eleutheria::save_area(*area_, current_base_.toStdString());
-    area_->dirty = false;
-    updateTitle();
-    statusBar()->showMessage("Area salvata", 3000);
-  } catch(const std::exception& e) {
-    QMessageBox::critical(this, "Errore salvataggio", e.what());
-  }
-}
-
-void MainWindow::saveAreaAs() {
-  if(!area_) {
-    return;
-  }
-  const QString suggested =
-      area_ ? QString::fromStdString(area_->meta.name) : QStringLiteral("area");
-  const QString start =
-      current_base_.isEmpty() ? QString() : QFileInfo(current_base_).absolutePath();
-  const QString path = eleutheria_ui::chooseSaveFile(
-      this, QStringLiteral("Salva area come"), QStringLiteral("Area (*.ele)"), start,
-      suggested + QStringLiteral(".ele"));
-  if(path.isEmpty()) {
-    return;
-  }
-  QString base = path;
-  if(base.endsWith(".ele", Qt::CaseInsensitive)) {
-    base.chop(4);
-  }
-  current_base_ = base;
-  saveArea();
-}
-
-void MainWindow::validateArea() {
-  if(!area_) {
-    return;
-  }
-  applyCurrentEditor();
-  applyWorkspaceIndexToEditors();
-  const auto* idx = workspace_index_ready_ ? &workspace_index_ : nullptr;
-  const auto issues = eleutheria::validate_area(*area_, idx);
-  if(issues.empty()) {
-    QMessageBox::information(this, "Validazione", "Nessun problema rilevato.");
-    return;
-  }
-  QString msg;
-  int infos = 0;
-  int warnings = 0;
-  for(const auto& issue : issues) {
-    const char* sev =
-        issue.severity == eleutheria::ValidationIssue::Severity::Info      ? "info"
-        : issue.severity == eleutheria::ValidationIssue::Severity::Warning ? "warn"
-                                                                           : "err";
-    if(issue.severity == eleutheria::ValidationIssue::Severity::Info) {
-      ++infos;
-    } else {
-      ++warnings;
-    }
-    msg += QString("[%1 %2 #%3] %4\n")
-               .arg(QString::fromUtf8(sev))
-               .arg(QString::fromStdString(issue.kind))
-               .arg(issue.vnum)
-               .arg(QString::fromStdString(issue.message));
-  }
-  if(warnings == 0) {
-    QMessageBox::information(
-        this, "Validazione",
-        QStringLiteral("Solo avvisi informativi (%1), nessun errore bloccante.\n\n%2")
-            .arg(infos)
-            .arg(msg));
-  } else {
-    QMessageBox::warning(this, "Validazione", msg);
-  }
-}
-
 void MainWindow::about() {
   QMessageBox::about(
       this, "Izanagi",
@@ -1192,232 +946,221 @@ void MainWindow::about() {
       "Compilabile su Windows, macOS e Linux (Qt 6 / C++17).");
 }
 
-void MainWindow::applyCurrentEditor() {
-  if(!area_) {
+void MainWindow::openSelectedWorkspaceArea() {
+  if(workspace_table_ == nullptr) {
     return;
   }
-  // Non chiamare refreshLists() qui: distruggerebbe gli item della lista
-  // mentre e' ancora in corso currentRowChanged → crash.
-  if(current_room_) {
-    const eleutheria::Room* previous =
-        area_->rooms.count(*current_room_) ? &area_->rooms.at(*current_room_) : nullptr;
-    auto room = room_editor_->save(previous);
-    if(room.vnum != *current_room_) {
-      area_->rooms.erase(*current_room_);
-      area_->dirty_rooms.erase(*current_room_);
-      area_->dirty_rooms.insert(room.vnum);
-      current_room_ = room.vnum;
-    } else if(previous != nullptr) {
-      eleutheria::preserve_flag_tokens(room, *previous);
+  auto* item = workspace_table_->currentItem();
+  if(item == nullptr) {
+    statusBar()->showMessage(QStringLiteral("Seleziona prima un'area nell'elenco."), 4000);
+    return;
+  }
+  onWorkspaceAreaActivated(item);
+}
+
+AreaPanel* MainWindow::addAreaPanel(eleutheria::Area area, const QString& base_path) {
+  auto* panel = new AreaPanel(catalog_, std::move(area), base_path);
+  panel->setMaxLineLength(max_line_length_);
+  panel->setWorkspaceIndex(&workspace_index_, workspace_index_ready_);
+
+  auto* dock = new QDockWidget(panel->displayName(), this);
+  dock->setObjectName(QStringLiteral("areaDock_%1").arg(++area_dock_counter_));
+  dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
+                    QDockWidget::DockWidgetFloatable);
+  dock->setWidget(panel);
+  dock->setToolTip(QDir::toNativeSeparators(base_path));
+  dock->installEventFilter(this);
+
+  // Si incastra con le altre aree aperte (a schede), o al posto del segnaposto.
+  QDockWidget* anchor = area_docks_.empty() ? area_placeholder_dock_ : area_docks_.back();
+  if(anchor != nullptr && !anchor->isFloating() &&
+     dockWidgetArea(anchor) != Qt::NoDockWidgetArea) {
+    addDockWidget(dockWidgetArea(anchor), dock);
+    tabifyDockWidget(anchor, dock);
+  } else {
+    addDockWidget(Qt::RightDockWidgetArea, dock);
+  }
+  area_docks_.push_back(dock);
+
+  connect(panel, &AreaPanel::titleChanged, this, [this, panel, dock]() {
+    dock->setWindowTitle(panel->displayName());
+    dock->setToolTip(QDir::toNativeSeparators(panel->basePath()));
+    if(panel == activePanel()) {
+      updateTitle();
+      updateStatusCounts();
     }
-    area_->rooms[room.vnum] = room;
-  }
-  if(current_mob_) {
-    const eleutheria::Mobile* previous =
-        area_->mobiles.count(*current_mob_) ? &area_->mobiles.at(*current_mob_) : nullptr;
-    auto mob = mob_editor_->save(previous);
-    if(mob.vnum != *current_mob_) {
-      area_->mobiles.erase(*current_mob_);
-      area_->dirty_mobs.erase(*current_mob_);
-      area_->dirty_mobs.insert(mob.vnum);
-      current_mob_ = mob.vnum;
-    } else if(previous != nullptr) {
-      eleutheria::preserve_flag_tokens(mob, *previous);
+  });
+  connect(panel, &AreaPanel::statusMessage, statusBar(), &QStatusBar::showMessage);
+  connect(panel, &AreaPanel::closeRequested, this, [this, panel]() { closeAreaPanel(panel); });
+  connect(dock, &QDockWidget::visibilityChanged, this, [this, panel](bool visible) {
+    if(visible) {
+      setActivePanel(panel);
     }
-    area_->mobiles[mob.vnum] = mob;
+  });
+
+  if(!area_toggle_action_->isChecked()) {
+    area_toggle_action_->setChecked(true);
   }
-  if(current_obj_) {
-    const eleutheria::GameObject* previous =
-        area_->objects.count(*current_obj_) ? &area_->objects.at(*current_obj_) : nullptr;
-    auto obj = obj_editor_->save(previous);
-    if(obj.vnum != *current_obj_) {
-      area_->objects.erase(*current_obj_);
-      area_->dirty_objects.erase(*current_obj_);
-      area_->dirty_objects.insert(obj.vnum);
-      current_obj_ = obj.vnum;
-    } else if(previous != nullptr) {
-      eleutheria::preserve_flag_tokens(obj, *previous);
+  dock->show();
+  dock->raise();
+  updateAreaPlaceholder();
+  setActivePanel(panel);
+  return panel;
+}
+
+AreaPanel* MainWindow::findOpenArea(const QString& base_path) const {
+  if(base_path.isEmpty()) {
+    return nullptr;
+  }
+  const QString wanted = QDir::cleanPath(QFileInfo(base_path).absoluteFilePath());
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+  const auto cs = Qt::CaseInsensitive;
+#else
+  const auto cs = Qt::CaseSensitive;
+#endif
+  for(auto* dock : area_docks_) {
+    auto* panel = qobject_cast<AreaPanel*>(dock->widget());
+    if(panel == nullptr || panel->basePath().isEmpty()) {
+      continue;
     }
-    area_->objects[obj.vnum] = obj;
-  }
-  if(current_zone_) {
-    auto zone = zone_editor_->save();
-    if(zone.number != *current_zone_) {
-      area_->zones.erase(*current_zone_);
-      area_->dirty_zones.erase(*current_zone_);
-      area_->dirty_zones.insert(zone.number);
-      current_zone_ = zone.number;
+    const QString have = QDir::cleanPath(QFileInfo(panel->basePath()).absoluteFilePath());
+    if(have.compare(wanted, cs) == 0) {
+      return panel;
     }
-    area_->zones[zone.number] = zone;
   }
-  if(spe_editor_ != nullptr) {
-    area_->specials = spe_editor_->save();
+  return nullptr;
+}
+
+bool MainWindow::closeAreaPanel(AreaPanel* panel) {
+  if(panel == nullptr) {
+    return true;
+  }
+  if(!panel->maybeSave()) {
+    return false;
+  }
+  QDockWidget* dock = nullptr;
+  for(auto it = area_docks_.begin(); it != area_docks_.end(); ++it) {
+    if((*it)->widget() == panel) {
+      dock = *it;
+      area_docks_.erase(it);
+      break;
+    }
+  }
+  if(dock != nullptr) {
+    dock->removeEventFilter(this);
+    removeDockWidget(dock);
+    dock->deleteLater();
+  }
+  if(active_panel_ == panel) {
+    active_panel_ = nullptr;
+    // Attiva un'altra area ancora visibile, se c'e'
+    for(auto* other : area_docks_) {
+      if(!other->visibleRegion().isEmpty() || other->isFloating()) {
+        active_panel_ = qobject_cast<AreaPanel*>(other->widget());
+        break;
+      }
+    }
+    if(active_panel_ == nullptr && !area_docks_.empty()) {
+      active_panel_ = qobject_cast<AreaPanel*>(area_docks_.back()->widget());
+    }
+  }
+  updateAreaPlaceholder();
+  updateTitle();
+  updateStatusCounts();
+  return true;
+}
+
+void MainWindow::setActivePanel(AreaPanel* panel) {
+  if(panel == active_panel_) {
+    return;
+  }
+  active_panel_ = panel;
+  updateTitle();
+  updateStatusCounts();
+}
+
+AreaPanel* MainWindow::activePanel() const {
+  if(active_panel_ != nullptr) {
+    return active_panel_;
+  }
+  if(!area_docks_.empty()) {
+    return qobject_cast<AreaPanel*>(area_docks_.back()->widget());
+  }
+  return nullptr;
+}
+
+void MainWindow::updateAreaPlaceholder() {
+  if(area_placeholder_dock_ == nullptr) {
+    return;
+  }
+  const bool show = area_docks_.empty() && area_toggle_action_ != nullptr &&
+                    area_toggle_action_->isChecked();
+  area_placeholder_dock_->setVisible(show);
+}
+
+void MainWindow::setAreaWindowsVisible(bool visible) {
+  for(auto* dock : area_docks_) {
+    dock->setVisible(visible);
+  }
+  updateAreaPlaceholder();
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+  // La X di un pannello area chiude l'area (chiedendo se salvare), non la nasconde.
+  if(event->type() == QEvent::Close) {
+    for(auto* dock : area_docks_) {
+      if(dock == watched) {
+        event->ignore();
+        closeAreaPanel(qobject_cast<AreaPanel*>(dock->widget()));
+        return true;
+      }
+    }
+  }
+  // Clic dentro un pannello area: diventa l'area attiva (per i comandi dei menu).
+  if(event->type() == QEvent::MouseButtonPress || event->type() == QEvent::FocusIn) {
+    if(auto* w = qobject_cast<QWidget*>(watched)) {
+      for(QWidget* p = w; p != nullptr; p = p->parentWidget()) {
+        if(auto* panel = qobject_cast<AreaPanel*>(p)) {
+          setActivePanel(panel);
+          break;
+        }
+      }
+    }
+  }
+  return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::saveActiveArea() {
+  if(auto* panel = activePanel()) {
+    panel->save();
   }
 }
 
-void MainWindow::onSpeEdited() {
-  if(!area_ || spe_editor_ == nullptr) {
-    return;
+void MainWindow::saveActiveAreaAs() {
+  if(auto* panel = activePanel()) {
+    panel->saveAs();
   }
-  area_->specials = spe_editor_->save();
-  area_->specials_dirty = true;
-  markDirty();
-  status_counts_->setText(
-      QString("Stanze: %1   Mob: %2   Oggetti: %3   Zone: %4   Shop: %5   Spe: %6")
-          .arg(area_->rooms.size())
-          .arg(area_->mobiles.size())
-          .arg(area_->objects.size())
-          .arg(area_->zones.size())
-          .arg(area_->shops.size())
-          .arg(area_->specials.size()));
 }
 
-void MainWindow::onRoomSelected() {
-  if(!area_ || room_list_->currentItem() == nullptr) {
-    return;
+void MainWindow::saveAllAreas() {
+  int saved = 0;
+  for(auto* dock : area_docks_) {
+    auto* panel = qobject_cast<AreaPanel*>(dock->widget());
+    if(panel != nullptr && panel->isDirty() && panel->save()) {
+      ++saved;
+    }
   }
-  const auto vnum = room_list_->currentItem()->data(Qt::UserRole).toLongLong();
-  applyCurrentEditor();
-  const auto it = area_->rooms.find(vnum);
-  if(it == area_->rooms.end()) {
-    return;
-  }
-  current_room_ = vnum;
-  room_editor_->setArea(&*area_);
-  room_editor_->load(it->second);
+  statusBar()->showMessage(QStringLiteral("Aree salvate: %1").arg(saved), 4000);
 }
 
-void MainWindow::onMobSelected() {
-  if(!area_ || mob_list_->currentItem() == nullptr) {
-    return;
-  }
-  const auto vnum = mob_list_->currentItem()->data(Qt::UserRole).toLongLong();
-  applyCurrentEditor();
-  const auto it = area_->mobiles.find(vnum);
-  if(it == area_->mobiles.end()) {
-    return;
-  }
-  current_mob_ = vnum;
-  mob_editor_->load(it->second);
+void MainWindow::closeActiveArea() {
+  closeAreaPanel(activePanel());
 }
 
-void MainWindow::onObjSelected() {
-  if(!area_ || obj_list_->currentItem() == nullptr) {
-    return;
+void MainWindow::validateActiveArea() {
+  if(auto* panel = activePanel()) {
+    panel->validate();
+  } else {
+    statusBar()->showMessage(QStringLiteral("Nessuna area aperta da validare."), 4000);
   }
-  const auto vnum = obj_list_->currentItem()->data(Qt::UserRole).toLongLong();
-  applyCurrentEditor();
-  const auto it = area_->objects.find(vnum);
-  if(it == area_->objects.end()) {
-    return;
-  }
-  current_obj_ = vnum;
-  obj_editor_->load(it->second);
-}
-
-void MainWindow::onZoneSelected() {
-  if(!area_ || zone_list_->currentItem() == nullptr) {
-    return;
-  }
-  const int num = zone_list_->currentItem()->data(Qt::UserRole).toInt();
-  applyCurrentEditor();
-  const auto it = area_->zones.find(num);
-  if(it == area_->zones.end()) {
-    return;
-  }
-  current_zone_ = num;
-  zone_editor_->load(it->second);
-}
-
-void MainWindow::addRoom() {
-  if(!area_) {
-    return;
-  }
-  applyCurrentEditor();
-  std::int64_t vnum = area_->rooms.empty() ? 1 : (area_->rooms.rbegin()->first + 1);
-  eleutheria::Room room;
-  room.vnum = vnum;
-  room.name = "Nuova stanza";
-  room.description = "Descrizione.\n";
-  area_->rooms[vnum] = room;
-  area_->dirty_rooms.insert(vnum);
-  current_room_ = vnum;
-  markDirty();
-  refreshLists();
-  room_editor_->setArea(&*area_);
-  room_editor_->load(area_->rooms.at(vnum));
-  tabs_->setCurrentIndex(0);
-}
-
-void MainWindow::addMob() {
-  if(!area_) {
-    return;
-  }
-  applyCurrentEditor();
-  std::int64_t vnum = area_->mobiles.empty() ? 1 : (area_->mobiles.rbegin()->first + 1);
-  eleutheria::Mobile mob;
-  mob.vnum = vnum;
-  mob.name = "nuovo mob";
-  mob.short_descr = "un nuovo mob";
-  mob.long_descr = "Un nuovo mob e' qui.\n";
-  mob.letter = 'A';
-  mob.gold_exp_race_form = true;
-  area_->mobiles[vnum] = mob;
-  area_->dirty_mobs.insert(vnum);
-  current_mob_ = vnum;
-  markDirty();
-  refreshLists();
-  mob_editor_->load(area_->mobiles.at(vnum));
-  tabs_->setCurrentIndex(1);
-}
-
-void MainWindow::addObj() {
-  if(!area_) {
-    return;
-  }
-  applyCurrentEditor();
-  std::int64_t vnum = area_->objects.empty() ? 1 : (area_->objects.rbegin()->first + 1);
-  eleutheria::GameObject obj;
-  obj.vnum = vnum;
-  obj.name = "nuovo oggetto";
-  obj.short_description = "un nuovo oggetto";
-  obj.description = "Un nuovo oggetto e' qui.";
-  obj.type_flag = 15;
-  area_->objects[vnum] = obj;
-  area_->dirty_objects.insert(vnum);
-  current_obj_ = vnum;
-  markDirty();
-  refreshLists();
-  obj_editor_->load(area_->objects.at(vnum));
-  tabs_->setCurrentIndex(2);
-}
-
-void MainWindow::deleteCurrent() {
-  if(!area_) {
-    return;
-  }
-  const int tab = tabs_->currentIndex();
-  if(tab == 0 && current_room_) {
-    area_->dirty_rooms.erase(*current_room_);
-    area_->rooms.erase(*current_room_);
-    current_room_.reset();
-    room_editor_->clear();
-  } else if(tab == 1 && current_mob_) {
-    area_->dirty_mobs.erase(*current_mob_);
-    area_->mobiles.erase(*current_mob_);
-    current_mob_.reset();
-    mob_editor_->clear();
-  } else if(tab == 2 && current_obj_) {
-    area_->dirty_objects.erase(*current_obj_);
-    area_->objects.erase(*current_obj_);
-    current_obj_.reset();
-    obj_editor_->clear();
-  } else if(tab == 3 && current_zone_) {
-    area_->dirty_zones.erase(*current_zone_);
-    area_->zones.erase(*current_zone_);
-    current_zone_.reset();
-    zone_editor_->clear();
-  }
-  markDirty();
-  refreshLists();
 }

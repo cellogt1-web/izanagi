@@ -7,6 +7,7 @@
 #include "eleutheria/workspace_index.hpp"
 
 #include <QMainWindow>
+#include <QPointer>
 #include <QString>
 #include <optional>
 #include <vector>
@@ -14,18 +15,17 @@
 class QAction;
 class QActionGroup;
 class QMenu;
-class QListWidget;
 class QTableWidget;
 class QTableWidgetItem;
-class QTabWidget;
 class QLabel;
 class QDockWidget;
-class RoomEditor;
-class MobEditor;
-class ObjEditor;
-class ZoneEditor;
-class SpeEditor;
+class AreaPanel;
 
+// Finestra principale modulare: in alto solo i menu; tutto il resto sono pannelli
+// (QDockWidget) spostabili, staccabili su altri schermi e nascondibili.
+//  - pannello Workspace (elenco aree)
+//  - un pannello per ogni area aperta (piu' aree insieme)
+//  - segnaposto "nessuna area aperta" quando non ce ne sono
 class MainWindow : public QMainWindow {
   Q_OBJECT
  public:
@@ -34,89 +34,76 @@ class MainWindow : public QMainWindow {
 
  protected:
   void closeEvent(QCloseEvent* event) override;
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
  private slots:
   void newArea();
   void openAny();
   void manageWorkspaces();
   void addAreaToWorkspace();
-  void saveArea();
-  void saveAreaAs();
-  void validateArea();
+  void saveActiveArea();
+  void saveActiveAreaAs();
+  void saveAllAreas();
+  void closeActiveArea();
+  void validateActiveArea();
   void about();
 
-  void onRoomSelected();
-  void onMobSelected();
-  void onObjSelected();
-  void onZoneSelected();
-  void onSpeEdited();
   void onWorkspaceAreaActivated(QTableWidgetItem* item);
-  void applyCurrentEditor();
-  void addRoom();
-  void addMob();
-  void addObj();
-  void deleteCurrent();
   void setTheme(AppTheme theme);
   void setWorkspaceColumnVisible(int logical_column, bool visible);
   void editLineLengthLimit();
 
  private:
   void buildUi();
+  QDockWidget* buildWorkspaceDock();
   void applyCurrentTheme();
   void applyMaxLineLength();
   void loadMaxLineLength();
   void saveMaxLineLength();
-  void setArea(eleutheria::Area area);
-  void refreshLists();
   void refreshWorkspaceList();
   void setupWorkspaceColumnsMenu(QMenu* parent_menu);
   void applyWorkspaceColumnVisibility();
   void saveWorkspaceTableState();
   void restoreWorkspaceTableState();
   void updateTitle();
-  bool maybeSave();
-  void markDirty();
+  void updateStatusCounts();
   void loadWorkspace(const QString& path, bool interactive = true);
   void showWorkspaceManager(const QString& warning);
   QString areasWithNameProblems() const;
-  void openAreaFromWorkspace(const QString& area_path);
   void saveLastWorkspacePath(const QString& path);
   void restoreLastWorkspace();
   void rebuildWorkspaceIndex();
-  void applyWorkspaceIndexToEditors();
-  QString currentAreaFolderName() const;
+  void openSelectedWorkspaceArea();
+
+  // Pannelli area
+  AreaPanel* addAreaPanel(eleutheria::Area area, const QString& base_path);
+  AreaPanel* findOpenArea(const QString& base_path) const;
+  bool closeAreaPanel(AreaPanel* panel);  // false = annullato
+  void setActivePanel(AreaPanel* panel);
+  AreaPanel* activePanel() const;
+  void updateAreaPlaceholder();
+  void setAreaWindowsVisible(bool visible);
 
   eleutheria::Catalog catalog_;
-  std::optional<eleutheria::Area> area_;
-  QString current_base_;
 
   std::optional<eleutheria::Workspace> workspace_;
   std::vector<eleutheria::WorkspaceArea> workspace_areas_;
   eleutheria::WorkspaceEntityIndex workspace_index_;
   bool workspace_index_ready_ = false;
 
-  QTabWidget* tabs_ = nullptr;
-  QListWidget* room_list_ = nullptr;
-  QListWidget* mob_list_ = nullptr;
-  QListWidget* obj_list_ = nullptr;
-  QListWidget* zone_list_ = nullptr;
   QTableWidget* workspace_table_ = nullptr;
   QDockWidget* workspace_dock_ = nullptr;
+  QDockWidget* area_placeholder_dock_ = nullptr;
   QAction* workspace_toggle_action_ = nullptr;
+  QAction* area_toggle_action_ = nullptr;
   std::vector<QAction*> workspace_column_actions_;
-  RoomEditor* room_editor_ = nullptr;
-  MobEditor* mob_editor_ = nullptr;
-  ObjEditor* obj_editor_ = nullptr;
-  ZoneEditor* zone_editor_ = nullptr;
-  SpeEditor* spe_editor_ = nullptr;
   QLabel* status_counts_ = nullptr;
   QActionGroup* theme_group_ = nullptr;
 
+  std::vector<QDockWidget*> area_docks_;
+  QPointer<AreaPanel> active_panel_;
+  int area_dock_counter_ = 0;
+
   AppTheme current_theme_ = AppTheme::Dark;
   int max_line_length_ = 0;
-
-  std::optional<std::int64_t> current_room_;
-  std::optional<std::int64_t> current_mob_;
-  std::optional<std::int64_t> current_obj_;
-  std::optional<int> current_zone_;
 };

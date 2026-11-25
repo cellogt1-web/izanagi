@@ -6,6 +6,8 @@ add_executable(izanagi
   main.cpp
   main_window.cpp
   workspace_manager.cpp
+  area_panel.cpp
+  area_panel.hpp
   workspace_manager.hpp
   main_window.hpp
   app_theme.cpp
