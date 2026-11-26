@@ -7,6 +7,8 @@ add_executable(izanagi
   main_window.cpp
   workspace_manager.cpp
   area_panel.cpp
+  exit_dialog.cpp
+  exit_dialog.hpp
   project_store.cpp
   project_store.hpp
   project_panel.cpp

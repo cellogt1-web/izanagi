@@ -54,5 +54,7 @@ std::string format_flag_bits(std::uint64_t flags);
 std::string format_flag_bits_for_file(std::uint64_t value, const std::string& prior_token);
 std::string format_signed(std::int64_t value);
 void write_tilde_string(std::ostream& out, std::string_view value);
+/** Come write_tilde_string ma per testi multiriga: garantisce "testo\n~". */
+void write_tilde_block(std::ostream& out, std::string_view value);
 
 }  // namespace eleutheria

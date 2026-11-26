@@ -39,6 +39,9 @@ class RoomEditor : public QWidget {
   void areaResetsChanged();
   // kind: 'R' room, 'M' mob, 'O' object
   void navigateRequested(QChar kind, qint64 vnum);
+  /** Uscita di ritorno da scrivere in un'ALTRA area del workspace (state: -1 = nessun reset D). */
+  void externalExitRequested(const QString& area_folder, qint64 room_vnum, int dir,
+                             const eleutheria::Exit& exit, int state);
 
  private slots:
   void addMobReset();
@@ -63,6 +66,9 @@ class RoomEditor : public QWidget {
   std::string makeResetCommentE(std::int64_t obj_vnum, int wear_pos) const;
   std::string makeResetCommentG(std::int64_t obj_vnum) const;
   std::size_t insertAfterMobChain(eleutheria::Zone& zone, std::size_t mob_index) const;
+  void openExitDialog(int dir);
+  void updateExitButtons();
+  eleutheria::Exit exitFromRow(int dir) const;
 
   const eleutheria::Catalog& catalog_;
   eleutheria::Area* area_ = nullptr;

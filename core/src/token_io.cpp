@@ -313,6 +313,17 @@ std::string format_signed(std::int64_t value) {
   return std::to_string(value);
 }
 
+void write_tilde_block(std::ostream& out, std::string_view value) {
+  // Testi su piu' righe (descrizioni): il server (fread_string) tiene tutto fino a '~',
+  // quindi il testo deve finire con un a capo, come nei file originali ("testo\n~").
+  // read_tilde_string toglie quell'a capo in lettura: qui lo rimettiamo.
+  out << value;
+  if(!value.empty() && value.back() != '\n') {
+    out << '\n';
+  }
+  out << "~\n";
+}
+
 void write_tilde_string(std::ostream& out, std::string_view value) {
   out << value;
   if(value.empty() || value.back() != '\n') {

@@ -52,10 +52,15 @@ class AreaPanel : public QWidget {
 
   QString countsText() const;
 
+  /** Scrive un'uscita (es. di ritorno da un'altra area) in una stanza di questa area. */
+  bool applyExternalExit(std::int64_t room, int dir, const eleutheria::Exit& exit, int state);
+
  signals:
   void titleChanged();
   void statusMessage(const QString& text, int timeout_ms);
   void closeRequested();
+  void externalExitRequested(const QString& area_folder, qint64 room_vnum, int dir,
+                             const eleutheria::Exit& exit, int state);
 
  private:
   void buildUi();

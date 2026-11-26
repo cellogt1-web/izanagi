@@ -113,7 +113,7 @@ std::string format_room_block(const Room& room) {
   std::ostringstream out;
   out << '#' << room.vnum << '\n';
   write_tilde_string(out, room.name);
-  write_tilde_string(out, room.description);
+  write_tilde_block(out, room.description);
   out << room.zone_hint << ' '
       << format_flag_bits_for_file(static_cast<std::uint64_t>(room.room_flags), room.room_flags_token)
       << ' ';
@@ -140,20 +140,24 @@ std::string format_room_block(const Room& room) {
       continue;
     }
     out << 'D' << d << '\n';
-    write_tilde_string(out, ex.general_description);
+    write_tilde_block(out, ex.general_description);
     write_tilde_string(out, ex.keyword);
     out << format_flag_bits_for_file(static_cast<std::uint64_t>(ex.exit_info), ex.exit_info_token)
-        << ' ' << ex.key << ' ' << ex.to_room << '\n';
+        << ' ' << ex.key << ' ' << ex.to_room;
+    if(ex.has_open_cmd) {
+      out << ' ' << ex.open_cmd;
+    }
+    out << '\n';
   }
   for(const auto& ed : room.extras) {
     out << "E\n";
     write_tilde_string(out, ed.keywords);
-    write_tilde_string(out, ed.description);
+    write_tilde_block(out, ed.description);
   }
   if(room.has_bright) {
     out << "L\n";
-    write_tilde_string(out, room.bright_night);
-    write_tilde_string(out, room.bright_day);
+    write_tilde_block(out, room.bright_night);
+    write_tilde_block(out, room.bright_day);
   }
   out << "S\n";
   return ensure_trailing_newline(out.str());
@@ -164,8 +168,8 @@ std::string format_mobile_block(const Mobile& mob) {
   out << '#' << mob.vnum << '\n';
   write_tilde_string(out, mob.name);
   write_tilde_string(out, mob.short_descr);
-  write_tilde_string(out, mob.long_descr);
-  write_tilde_string(out, mob.description);
+  write_tilde_block(out, mob.long_descr);
+  write_tilde_block(out, mob.description);
   out << format_flag_bits_for_file(static_cast<std::uint64_t>(mob.act), mob.act_token) << ' '
       << format_flag_bits_for_file(static_cast<std::uint64_t>(mob.affected_by), mob.affected_by_token)
       << ' ' << mob.alignment << ' ' << mob.letter;
@@ -202,8 +206,8 @@ std::string format_mobile_block(const Mobile& mob) {
   }
   out << '\n';
   if(mob.letter == 'L') {
-    write_tilde_string(out, mob.sounds);
-    write_tilde_string(out, mob.distant_sounds);
+    write_tilde_block(out, mob.sounds);
+    write_tilde_block(out, mob.distant_sounds);
   }
   return ensure_trailing_newline(out.str());
 }
@@ -225,7 +229,7 @@ std::string format_object_block(const GameObject& obj) {
   for(const auto& ed : obj.extras) {
     out << "E\n";
     write_tilde_string(out, ed.keywords);
-    write_tilde_string(out, ed.description);
+    write_tilde_block(out, ed.description);
   }
   for(const auto& aff : obj.affects) {
     out << "A\n" << aff.location << ' ' << aff.modifier << '\n';
@@ -262,8 +266,8 @@ std::string format_zone_block(const Zone& zone) {
       out << ' ' << cmd.arg4;
     }
     if(!cmd.comment.empty()) {
-      if(cmd.comment[0] != ' ' && cmd.comment[0] != '*') {
-        out << ' ';
+      if(cmd.comment[0] != ' ') {
+        out << "  ";  // il parser toglie gli spazi prima del commento: rimettili
       }
       out << cmd.comment;
     }

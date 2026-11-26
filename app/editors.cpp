@@ -1,5 +1,6 @@
 #include "editors.hpp"
 
+#include "exit_dialog.hpp"
 #include "extra_desc_editor.hpp"
 #include "flag_editor.hpp"
 #include "line_limited_edit.hpp"
@@ -31,10 +32,68 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSettings>
+#include <QSplitter>
 #include <QSignalBlocker>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QVBoxLayout>
+
+namespace {
+
+// ---- Sezioni ridimensionabili (splitter) con dimensioni ricordate ----
+QWidget* make_section(QWidget* parent, const QString& title, QWidget* content,
+                      QLayout* tail = nullptr) {
+  auto* box = new QWidget(parent);
+  auto* l = new QVBoxLayout(box);
+  l->setContentsMargins(0, 2, 0, 2);
+  l->setSpacing(3);
+  if(!title.isEmpty()) {
+    auto* label = new QLabel(title, box);
+    label->setStyleSheet(QStringLiteral("font-weight: bold;"));
+    l->addWidget(label);
+  }
+  if(content != nullptr) {
+    l->addWidget(content, 1);
+  }
+  if(tail != nullptr) {
+    l->addLayout(tail);
+  }
+  return box;
+}
+
+QWidget* scrollable(QWidget* parent, QWidget* content) {
+  auto* scroll = new QScrollArea(parent);
+  scroll->setWidgetResizable(true);
+  scroll->setFrameShape(QFrame::NoFrame);
+  scroll->setWidget(content);
+  return scroll;
+}
+
+QSplitter* make_sections_splitter(QWidget* parent) {
+  auto* split = new QSplitter(Qt::Vertical, parent);
+  split->setChildrenCollapsible(false);
+  split->setHandleWidth(7);
+  return split;
+}
+
+// Da chiamare dopo aver aggiunto le sezioni: imposta le proporzioni iniziali,
+// ripristina quelle salvate e le salva quando l'utente sposta un separatore.
+void finish_splitter(QSplitter* split, const QString& key, const QList<int>& initial) {
+  split->setSizes(initial);
+  const QString settings_key = QStringLiteral("ui/split/") + key;
+  QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
+  const QByteArray state = settings.value(settings_key).toByteArray();
+  if(!state.isEmpty()) {
+    split->restoreState(state);
+  }
+  QObject::connect(split, &QSplitter::splitterMoved, split, [split, settings_key](int, int) {
+    QSettings st(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
+    st.setValue(settings_key, split->saveState());
+  });
+}
+
+}  // namespace
 
 namespace {
 
@@ -382,17 +441,15 @@ RoomEditor::RoomEditor(const eleutheria::Catalog& catalog, QWidget* parent)
   head->addRow(QStringLiteral("Flags"), flags_summary_);
   summary_layout->addLayout(head);
 
-  summary_layout->addWidget(new QLabel(QStringLiteral("Entered from"), summary_page));
+  auto* summary_split = make_sections_splitter(summary_page);
   auto* entered_row = new QHBoxLayout();
   entered_from_list_ = new QListWidget(summary_page);
   entered_from_list_->setFont(QFont(QStringLiteral("Menlo"), 11));
-  entered_from_list_->setMaximumHeight(110);
   entered_row->addWidget(entered_from_list_, 1);
   goto_entered_btn_ = new QPushButton(QStringLiteral("Go to"), summary_page);
   entered_row->addWidget(goto_entered_btn_, 0, Qt::AlignTop);
-  summary_layout->addLayout(entered_row);
+  summary_split->addWidget(make_section(summary_page, QStringLiteral("Entered from"), nullptr, entered_row));
 
-  summary_layout->addWidget(new QLabel(QStringLiteral("References"), summary_page));
   auto* refs_row = new QHBoxLayout();
   contents_list_ = new QListWidget(summary_page);
   contents_list_->setFont(QFont(QStringLiteral("Menlo"), 11));
@@ -413,7 +470,9 @@ RoomEditor::RoomEditor(const eleutheria::Catalog& catalog, QWidget* parent)
   }
   btns->addStretch();
   refs_row->addLayout(btns);
-  summary_layout->addLayout(refs_row, 1);
+  summary_split->addWidget(make_section(summary_page, QStringLiteral("References"), nullptr, refs_row));
+  summary_layout->addWidget(summary_split, 1);
+  finish_splitter(summary_split, QStringLiteral("roomSummary"), {140, 400});
   tabs_->addTab(summary_page, QStringLiteral("Summary"));
 
   // --- Dettaglio stanza ---
@@ -429,21 +488,25 @@ RoomEditor::RoomEditor(const eleutheria::Catalog& catalog, QWidget* parent)
 
   description_ = new LineLimitedPlainTextEdit(room_page);
   configure_mud_text_field(description_);
+  description_->setAutoWrap(true);
   description_->setPlaceholderText(QStringLiteral("Descrizione stanza"));
-  room_layout->addWidget(new QLabel(QStringLiteral("Descrizione"), room_page));
-  room_layout->addWidget(description_, 2);
+  auto* detail_split = make_sections_splitter(room_page);
+  detail_split->addWidget(make_section(room_page, QStringLiteral("Descrizione"), description_));
 
   flags_ = new FlagEditor(room_page);
   flags_->setFlags(catalog_.room_flags());
-  room_layout->addWidget(new QLabel(QStringLiteral("Room flags"), room_page));
-  room_layout->addWidget(flags_);
+  detail_split->addWidget(
+      make_section(room_page, QStringLiteral("Room flags"), scrollable(room_page, flags_)));
 
-  exits_ = new QTableWidget(6, 6, room_page);
+  exits_ = new QTableWidget(6, 7, room_page);
   exits_->setHorizontalHeaderLabels(
       {QStringLiteral("Dir"), QStringLiteral("To"), QStringLiteral("Flags"), QStringLiteral("Key"),
-       QStringLiteral("Keywords"), QStringLiteral("Desc generale")});
+       QStringLiteral("Keywords"), QStringLiteral("Desc generale"), QString()});
   exits_->verticalHeader()->setVisible(false);
-  exits_->horizontalHeader()->setStretchLastSection(true);
+  exits_->horizontalHeader()->setStretchLastSection(false);
+  exits_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
+  exits_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Fixed);
+  exits_->horizontalHeader()->resizeSection(6, 100);
   const char* dirs[] = {"N", "E", "S", "W", "U", "D"};
   for(int i = 0; i < 6; ++i) {
     exits_->setItem(i, 0, new QTableWidgetItem(QString::fromUtf8(dirs[i])));
@@ -451,18 +514,25 @@ RoomEditor::RoomEditor(const eleutheria::Catalog& catalog, QWidget* parent)
     for(int c = 1; c < 6; ++c) {
       exits_->setItem(i, c, new QTableWidgetItem);
     }
+    // Pulsante per riga: finestra guidata Crea/Modifica uscita.
+    auto* btn = new QPushButton(QStringLiteral("Crea..."), exits_);
+    btn->setToolTip(QStringLiteral("Destinazione, porta, chiave, stato allo spawn, doppio senso..."));
+    connect(btn, &QPushButton::clicked, this, [this, i]() { openExitDialog(i); });
+    exits_->setCellWidget(i, 6, btn);
   }
-  room_layout->addWidget(new QLabel(
-      QStringLiteral(
-          "Uscite: To puo' essere stanza di questa area, di un'altra area, o placeholder."),
-      room_page));
-  room_layout->addWidget(exits_);
+  connect(exits_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* item) {
+    if(item != nullptr && item->column() == 1) {
+      updateExitButtons();
+    }
+  });
+  exits_->setToolTip(QStringLiteral(
+      "To puo' essere stanza di questa area, di un'altra area, o placeholder."));
   auto* exit_btns = new QHBoxLayout();
   auto* browse_exit_btn =
       new QPushButton(QStringLiteral("Sfoglia destinazione (riga selezionata)..."), room_page);
   exit_btns->addWidget(browse_exit_btn);
   exit_btns->addStretch();
-  room_layout->addLayout(exit_btns);
+  detail_split->addWidget(make_section(room_page, QStringLiteral("Uscite"), exits_, exit_btns));
   connect(browse_exit_btn, &QPushButton::clicked, this, [this]() {
     const int row = exits_->currentRow();
     if(row < 0 || row >= 6) {
@@ -483,7 +553,9 @@ RoomEditor::RoomEditor(const eleutheria::Catalog& catalog, QWidget* parent)
   });
 
   extras_ = new ExtraDescListEditor(room_page);
-  room_layout->addWidget(extras_, 1);
+  detail_split->addWidget(make_section(room_page, QStringLiteral("Extra description"), extras_));
+  room_layout->addWidget(detail_split, 1);
+  finish_splitter(detail_split, QStringLiteral("roomDetail"), {260, 150, 250, 170});
   connect(extras_, &ExtraDescListEditor::edited, this, [this]() {
     if(loading_) {
       return;
@@ -534,6 +606,8 @@ RoomEditor::RoomEditor(const eleutheria::Catalog& catalog, QWidget* parent)
   bright_day_ = new LineLimitedPlainTextEdit(bright_box);
   configure_mud_text_field(bright_night_);
   configure_mud_text_field(bright_day_);
+  bright_night_->setAutoWrap(true);
+  bright_day_->setAutoWrap(true);
   bright_layout->addWidget(bright_enable_);
   bright_layout->addWidget(new QLabel(QStringLiteral("Night"), bright_box));
   bright_layout->addWidget(bright_night_);
@@ -837,6 +911,7 @@ void RoomEditor::load(const eleutheria::Room& room) {
     exits_->item(i, 4)->setText(QString::fromStdString(ex.keyword));
     exits_->item(i, 5)->setText(QString::fromStdString(ex.general_description));
   }
+  updateExitButtons();
   vnum_->blockSignals(false);
   name_->blockSignals(false);
   description_->blockSignals(false);
@@ -1370,22 +1445,22 @@ MobEditor::MobEditor(const eleutheria::Catalog& catalog, QWidget* parent)
   distant_sounds_ = new LineLimitedPlainTextEdit(text_page);
   configure_mud_text_field(long_);
   configure_mud_text_field(description_);
+  description_->setAutoWrap(true);
   configure_mud_text_field(sounds_);
   configure_mud_text_field(distant_sounds_);
-  text_layout->addWidget(new QLabel(QStringLiteral("Long description"), text_page));
-  text_layout->addWidget(long_, 2);
-  text_layout->addWidget(new QLabel(QStringLiteral("Description"), text_page));
-  text_layout->addWidget(description_, 2);
-  text_layout->addWidget(new QLabel(
-      QStringLiteral(
-          "Suono in stanza (tipo L): messaggio periodico dove si trova il mob"),
-      text_page));
-  text_layout->addWidget(sounds_, 1);
-  text_layout->addWidget(new QLabel(
-      QStringLiteral(
-          "Suono stanze vicine (tipo L): messaggio sentito nelle room adiacenti"),
-      text_page));
-  text_layout->addWidget(distant_sounds_, 1);
+  auto* mob_text_split = make_sections_splitter(text_page);
+  mob_text_split->addWidget(make_section(text_page, QStringLiteral("Long description"), long_));
+  mob_text_split->addWidget(make_section(text_page, QStringLiteral("Description"), description_));
+  mob_text_split->addWidget(make_section(
+      text_page,
+      QStringLiteral("Suono in stanza (tipo L): messaggio periodico dove si trova il mob"),
+      sounds_));
+  mob_text_split->addWidget(make_section(
+      text_page,
+      QStringLiteral("Suono stanze vicine (tipo L): messaggio sentito nelle room adiacenti"),
+      distant_sounds_));
+  text_layout->addWidget(mob_text_split, 1);
+  finish_splitter(mob_text_split, QStringLiteral("mobTexts"), {200, 260, 110, 110});
   tabs_->addTab(text_page, QStringLiteral("Testi"));
 
   // --- Flags (layout compatto, scroll se serve) ---
@@ -1776,10 +1851,12 @@ ObjEditor::ObjEditor(const eleutheria::Catalog& catalog, QWidget* parent)
   configure_mud_text_field(action_);
   description_->setPlaceholderText(QStringLiteral("Descrizione a terra (long)"));
   action_->setPlaceholderText(QStringLiteral("Action description (opzionale)"));
-  text_layout->addWidget(new QLabel(QStringLiteral("Description"), text_page));
-  text_layout->addWidget(description_, 2);
-  text_layout->addWidget(new QLabel(QStringLiteral("Action description"), text_page));
-  text_layout->addWidget(action_, 1);
+  auto* obj_text_split = make_sections_splitter(text_page);
+  obj_text_split->addWidget(make_section(text_page, QStringLiteral("Description"), description_));
+  obj_text_split->addWidget(
+      make_section(text_page, QStringLiteral("Action description"), action_));
+  text_layout->addWidget(obj_text_split, 1);
+  finish_splitter(obj_text_split, QStringLiteral("objTexts"), {300, 150});
   tabs_->addTab(text_page, QStringLiteral("Testi"));
 
   // --- Flags ---
@@ -1828,19 +1905,26 @@ ObjEditor::ObjEditor(const eleutheria::Catalog& catalog, QWidget* parent)
   // --- Extra / Forbidden ---
   auto* extra_page = new QWidget(tabs_);
   auto* extra_layout = new QVBoxLayout(extra_page);
+  auto* obj_extra_split = make_sections_splitter(extra_page);
   extras_ = new ExtraDescListEditor(extra_page);
-  extra_layout->addWidget(extras_, 2);
+  obj_extra_split->addWidget(make_section(extra_page, QStringLiteral("Extra description"), extras_));
   connect(extras_, &ExtraDescListEditor::edited, this, [this]() { notifyEdited(); });
   forbidden_enable_ = new QCheckBox(QStringLiteral("Scrivi blocco P (forbidden)"), extra_page);
   forbidden_char_ = new LineLimitedPlainTextEdit(extra_page);
   forbidden_room_ = new LineLimitedPlainTextEdit(extra_page);
   configure_mud_text_field(forbidden_char_);
   configure_mud_text_field(forbidden_room_);
-  extra_layout->addWidget(forbidden_enable_);
-  extra_layout->addWidget(new QLabel(QStringLiteral("Forbidden to char"), extra_page));
-  extra_layout->addWidget(forbidden_char_, 1);
-  extra_layout->addWidget(new QLabel(QStringLiteral("Forbidden to room"), extra_page));
-  extra_layout->addWidget(forbidden_room_, 1);
+  auto* forbidden_box = new QWidget(extra_page);
+  auto* fb_layout = new QVBoxLayout(forbidden_box);
+  fb_layout->setContentsMargins(0, 0, 0, 0);
+  fb_layout->addWidget(forbidden_enable_);
+  fb_layout->addWidget(new QLabel(QStringLiteral("Forbidden to char"), forbidden_box));
+  fb_layout->addWidget(forbidden_char_, 1);
+  obj_extra_split->addWidget(make_section(extra_page, QString(), forbidden_box));
+  obj_extra_split->addWidget(
+      make_section(extra_page, QStringLiteral("Forbidden to room"), forbidden_room_));
+  extra_layout->addWidget(obj_extra_split, 1);
+  finish_splitter(obj_extra_split, QStringLiteral("objExtra"), {260, 150, 120});
   tabs_->addTab(extra_page, QStringLiteral("Extra / P"));
 
   auto notify = [this]() { notifyEdited(); };
@@ -2273,4 +2357,129 @@ void SpeEditor::removeSelected() {
   if(!indexes.isEmpty() && !loading_) {
     emit edited();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Uscite: finestra guidata
+// ---------------------------------------------------------------------------
+
+void RoomEditor::updateExitButtons() {
+  for(int i = 0; i < 6; ++i) {
+    auto* btn = qobject_cast<QPushButton*>(exits_->cellWidget(i, 6));
+    if(btn == nullptr) {
+      continue;
+    }
+    const auto* to = exits_->item(i, 1);
+    const bool present = to != nullptr && !to->text().trimmed().isEmpty();
+    btn->setText(present ? QStringLiteral("Modifica...") : QStringLiteral("Crea..."));
+  }
+}
+
+eleutheria::Exit RoomEditor::exitFromRow(int dir) const {
+  eleutheria::Exit ex;
+  if(area_ != nullptr && loaded_vnum_ >= 0) {
+    const auto it = area_->rooms.find(loaded_vnum_);
+    if(it != area_->rooms.end()) {
+      ex = it->second.exits[static_cast<std::size_t>(dir)];
+    }
+  }
+  const auto text = [&](int col) {
+    const auto* item = exits_->item(dir, col);
+    return item ? item->text().trimmed() : QString();
+  };
+  if(text(1).isEmpty()) {
+    eleutheria::Exit empty;
+    empty.general_description = ex.general_description;
+    return empty;
+  }
+  ex.present = true;
+  ex.to_room = text(1).toLongLong();
+  const std::int64_t info = text(2).toLongLong();
+  if(info != ex.exit_info) {
+    ex.exit_info_token.clear();
+  }
+  ex.exit_info = info;
+  ex.key = text(3).isEmpty() ? -1 : text(3).toLongLong();
+  ex.keyword = text(4).toStdString();
+  ex.general_description = exits_->item(dir, 5) ? exits_->item(dir, 5)->text().toStdString()
+                                                : std::string{};
+  return ex;
+}
+
+void RoomEditor::openExitDialog(int dir) {
+  if(area_ == nullptr) {
+    return;
+  }
+  const std::int64_t room_vnum = num_i64(vnum_);
+  const eleutheria::Exit current = exitFromRow(dir);
+  const auto state = exit_ui::find_spawn_state(*area_, room_vnum, dir);
+  exit_ui::ExitDialog dialog(this, catalog_, area_, current_area_name_, workspace_index_,
+                             room_vnum, name_->text(), dir, current, state);
+  if(dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+  const auto res = dialog.result();
+
+  // 1) La riga della tabella (resta la "verita'" che si salva con la stanza).
+  for(int c = 1; c < 6; ++c) {
+    if(exits_->item(dir, c) == nullptr) {
+      exits_->setItem(dir, c, new QTableWidgetItem);
+    }
+  }
+  {
+    const QSignalBlocker block(exits_);
+    if(res.remove) {
+      for(int c = 1; c < 6; ++c) {
+        exits_->item(dir, c)->setText({});
+      }
+    } else {
+      exits_->item(dir, 1)->setText(QString::number(res.exit.to_room));
+      exits_->item(dir, 2)->setText(QString::number(res.exit.exit_info));
+      exits_->item(dir, 3)->setText(QString::number(res.exit.key));
+      exits_->item(dir, 4)->setText(QString::fromStdString(res.exit.keyword));
+      exits_->item(dir, 5)->setText(QString::fromStdString(res.exit.general_description));
+    }
+  }
+  updateExitButtons();
+
+  // 2) Reset D della zona (e l'uscita nella copia dell'area, coerente con la tabella).
+  if(area_->rooms.count(room_vnum)) {
+    exit_ui::apply_exit(*area_, room_vnum, dir, res.remove ? eleutheria::Exit{} : res.exit,
+                        res.remove ? exit_ui::SpawnState::NoReset : res.state);
+  }
+
+  // 3) Uscita di ritorno.
+  if(!res.remove && res.two_way) {
+    const int opp = exit_ui::opposite_dir(dir);
+    eleutheria::Exit back;
+    back.present = true;
+    back.to_room = room_vnum;
+    back.exit_info = res.exit.exit_info;
+    back.key = res.exit.key;
+    back.keyword = res.exit.keyword;
+    if(res.dest_is_current_area) {
+      auto it = area_->rooms.find(res.exit.to_room);
+      if(it != area_->rooms.end()) {
+        const auto& existing = it->second.exits[static_cast<std::size_t>(opp)];
+        bool go = true;
+        if(existing.present && existing.to_room != room_vnum) {
+          go = QMessageBox::question(
+                   this, QStringLiteral("Uscita di ritorno"),
+                   QStringLiteral("La stanza #%1 ha gia' un'uscita %2 verso #%3.\nSostituirla?")
+                       .arg(res.exit.to_room)
+                       .arg(exit_ui::dir_name(opp))
+                       .arg(existing.to_room)) == QMessageBox::Yes;
+        }
+        if(go) {
+          back.general_description = existing.general_description;
+          exit_ui::apply_exit(*area_, res.exit.to_room, opp, back, res.state);
+        }
+      }
+    } else if(!res.dest_area.isEmpty()) {
+      emit externalExitRequested(res.dest_area, res.exit.to_room, opp, back,
+                                 static_cast<int>(res.state));
+    }
+  }
+  emit edited();
+  emit areaResetsChanged();
 }

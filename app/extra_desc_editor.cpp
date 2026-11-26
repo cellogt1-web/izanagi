@@ -84,6 +84,7 @@ ExtraDescDialog::ExtraDescDialog(QWidget* parent, int max_line_length)
   keywords_->setPlaceholderText(QStringLiteral("es. alberi secolari  (parole per look/examine)"));
   description_ = new LineLimitedPlainTextEdit(this);
   configure_mud_text_field(description_);
+  description_->setAutoWrap(true);
   description_->setMaxLineLength(max_line_length_ > 0 ? max_line_length_ : kDefaultMudLineLength);
   description_->setPlaceholderText(
       QStringLiteral("Testo mostrato nel MUD. A capo automatici al conferma."));
@@ -118,8 +119,11 @@ void ExtraDescDialog::setExtra(const eleutheria::ExtraDesc& extra) {
 eleutheria::ExtraDesc ExtraDescDialog::extra() const {
   eleutheria::ExtraDesc ed;
   ed.keywords = keywords_->text().trimmed().toStdString();
+  const auto& fmt = MudTextFormat::instance();
   const QString wrapped =
-      wrap_mud_description(description_->toPlainText(), max_line_length_);
+      max_line_length_ > 0
+          ? reflow_mud_text(description_->toPlainText(), max_line_length_, fmt.justify())
+          : wrap_mud_description(description_->toPlainText(), max_line_length_);
   ed.description = wrapped.toStdString();
   return ed;
 }

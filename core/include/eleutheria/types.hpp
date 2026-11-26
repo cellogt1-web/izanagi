@@ -31,6 +31,9 @@ struct Exit {
   std::string exit_info_token;  // spelling originale (es. 1|32|128)
   std::int64_t key = -1;
   std::int64_t to_room = -1;
+  /** 4o numero opzionale della riga uscita (open_cmd sul server). */
+  std::int64_t open_cmd = -1;
+  bool has_open_cmd = false;
 };
 
 struct Room {

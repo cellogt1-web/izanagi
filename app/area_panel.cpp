@@ -1,12 +1,18 @@
 #include "area_panel.hpp"
 
 #include "editors.hpp"
+#include "exit_dialog.hpp"
 #include "file_dialogs.hpp"
+#include "line_limited_edit.hpp"
 
 #include "eleutheria/area_io.hpp"
 #include "eleutheria/world.hpp"
 
 #include <QAction>
+#include <QCheckBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QSpinBox>
 #include <QFileInfo>
 #include <QFont>
 #include <QKeySequence>
@@ -83,6 +89,45 @@ void AreaPanel::buildUi() {
   toolbar_->addAction(QStringLiteral("Elimina"), this, &AreaPanel::deleteCurrent);
   toolbar_->addSeparator();
   toolbar_->addAction(QStringLiteral("Chiudi area"), this, &AreaPanel::closeRequested);
+
+  // A destra: impaginazione dei testi (limite caratteri per riga e giustificazione).
+  auto* spacer = new QWidget(toolbar_);
+  spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  toolbar_->addWidget(spacer);
+  auto* fmt_box = new QWidget(toolbar_);
+  auto* fmt_layout = new QHBoxLayout(fmt_box);
+  fmt_layout->setContentsMargins(6, 0, 6, 0);
+  fmt_layout->setSpacing(6);
+  fmt_layout->addWidget(new QLabel(QStringLiteral("Caratteri per riga:"), fmt_box));
+  auto* width_spin = new QSpinBox(fmt_box);
+  width_spin->setRange(0, 512);
+  width_spin->setSpecialValueText(QStringLiteral("nessun limite"));
+  width_spin->setToolTip(QStringLiteral(
+      "Limite caratteri per riga delle descrizioni. Scrivendo si va a capo da soli;\n"
+      "cambiando il valore il testo che stai guardando viene reimpaginato.\n"
+      "Per un nuovo paragrafo lascia una riga vuota (Invio due volte)."));
+  auto* justify_box = new QCheckBox(QStringLiteral("Giustifica"), fmt_box);
+  justify_box->setToolTip(QStringLiteral(
+      "Riempie le righe di spazi fino al limite (tranne l'ultima di ogni paragrafo)."));
+  fmt_layout->addWidget(width_spin);
+  fmt_layout->addWidget(justify_box);
+  toolbar_->addWidget(fmt_box);
+  auto sync = [width_spin, justify_box]() {
+    const auto& fmt = MudTextFormat::instance();
+    const QSignalBlocker b1(width_spin);
+    const QSignalBlocker b2(justify_box);
+    width_spin->setValue(fmt.maxLength());
+    justify_box->setChecked(fmt.justify());
+    justify_box->setEnabled(fmt.maxLength() > 0);
+  };
+  sync();
+  connect(&MudTextFormat::instance(), &MudTextFormat::changed, fmt_box, sync);
+  connect(width_spin, qOverload<int>(&QSpinBox::valueChanged), fmt_box, [justify_box](int v) {
+    MudTextFormat::instance().set(v, justify_box->isChecked());
+  });
+  connect(justify_box, &QCheckBox::toggled, fmt_box, [width_spin](bool on) {
+    MudTextFormat::instance().set(width_spin->value(), on);
+  });
   root->addWidget(toolbar_);
 
   tabs_ = new QTabWidget(this);
@@ -125,6 +170,8 @@ void AreaPanel::buildUi() {
       zone_editor_->load(area_.zones.at(*current_zone_));
     }
   });
+  connect(room_editor_, &RoomEditor::externalExitRequested, this,
+          &AreaPanel::externalExitRequested);
   connect(room_editor_, &RoomEditor::navigateRequested, this, [this](QChar kind, qint64 vnum) {
     applyCurrentEditor();
     if(kind == QLatin1Char('R') && area_.rooms.count(vnum)) {
@@ -279,11 +326,9 @@ void AreaPanel::refreshLists() {
 }
 
 void AreaPanel::markDirty() {
-  const bool was = area_.dirty;
+  // Sempre: area_.dirty puo' essere gia' stato messo da apply_exit senza aggiornare il titolo.
   area_.dirty = true;
-  if(!was) {
-    emit titleChanged();
-  }
+  emit titleChanged();
 }
 
 bool AreaPanel::save() {
@@ -583,4 +628,22 @@ void AreaPanel::deleteCurrent() {
   }
   markDirty();
   refreshLists();
+}
+
+bool AreaPanel::applyExternalExit(std::int64_t room, int dir, const eleutheria::Exit& exit,
+                                  int state) {
+  applyCurrentEditor();
+  if(!exit_ui::apply_exit(area_, room, dir, exit, static_cast<exit_ui::SpawnState>(state))) {
+    return false;
+  }
+  if(current_room_ && *current_room_ == room && area_.rooms.count(room)) {
+    room_editor_->setArea(&area_);
+    room_editor_->load(area_.rooms.at(room));
+  }
+  if(current_zone_ && area_.zones.count(*current_zone_)) {
+    zone_editor_->load(area_.zones.at(*current_zone_));
+  }
+  markDirty();
+  emit titleChanged();
+  return true;
 }

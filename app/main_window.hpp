@@ -79,6 +79,9 @@ class MainWindow : public QMainWindow {
   void restoreLastWorkspace();
   void rebuildWorkspaceIndex();
   void openSelectedWorkspaceArea();
+  void newAreaInWorkspace();
+  void applyExitInOtherArea(const QString& area_folder, qint64 room_vnum, int dir,
+                            const eleutheria::Exit& exit, int state);
 
   // Pannelli area
   AreaPanel* addAreaPanel(eleutheria::Area area, const QString& base_path);

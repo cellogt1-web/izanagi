@@ -128,7 +128,10 @@ Room parse_one_room_v2(TokenReader& r, std::int64_t vnum, std::vector<std::strin
       ex.key = r.read_number();
       ex.to_room = r.read_number();
       std::int64_t trailing = 0;
-      (void)r.try_read_number_same_line(&trailing);
+      if(r.try_read_number_same_line(&trailing)) {
+        ex.open_cmd = trailing;  // 4o numero opzionale (open_cmd del server)
+        ex.has_open_cmd = true;
+      }
     } else if(kind == 'E') {
       ExtraDesc ed;
       ed.keywords = r.read_tilde_string();
@@ -693,7 +696,7 @@ std::string serialize_rooms(const std::map<std::int64_t, Room>& rooms) {
   for(const auto& [vnum, room] : rooms) {
     out << '#' << vnum << '\n';
     write_tilde_string(out, room.name);
-    write_tilde_string(out, room.description);
+    write_tilde_block(out, room.description);
     out << room.zone_hint << ' '
         << format_flag_bits_for_file(static_cast<std::uint64_t>(room.room_flags),
                                      room.room_flags_token)
@@ -722,21 +725,25 @@ std::string serialize_rooms(const std::map<std::int64_t, Room>& rooms) {
         continue;
       }
       out << 'D' << d << '\n';
-      write_tilde_string(out, ex.general_description);
+      write_tilde_block(out, ex.general_description);
       write_tilde_string(out, ex.keyword);
       out << format_flag_bits_for_file(static_cast<std::uint64_t>(ex.exit_info),
                                        ex.exit_info_token)
-          << ' ' << ex.key << ' ' << ex.to_room << '\n';
+          << ' ' << ex.key << ' ' << ex.to_room;
+      if(ex.has_open_cmd) {
+        out << ' ' << ex.open_cmd;
+      }
+      out << '\n';
     }
     for(const auto& ed : room.extras) {
       out << "E\n";
       write_tilde_string(out, ed.keywords);
-      write_tilde_string(out, ed.description);
+      write_tilde_block(out, ed.description);
     }
     if(room.has_bright) {
       out << "L\n";
-      write_tilde_string(out, room.bright_night);
-      write_tilde_string(out, room.bright_day);
+      write_tilde_block(out, room.bright_night);
+      write_tilde_block(out, room.bright_day);
     }
     out << "S\n";
   }
@@ -750,8 +757,8 @@ std::string serialize_mobiles(const std::map<std::int64_t, Mobile>& mobiles) {
     out << '#' << vnum << '\n';
     write_tilde_string(out, mob.name);
     write_tilde_string(out, mob.short_descr);
-    write_tilde_string(out, mob.long_descr);
-    write_tilde_string(out, mob.description);
+    write_tilde_block(out, mob.long_descr);
+    write_tilde_block(out, mob.description);
     out << format_flag_bits_for_file(static_cast<std::uint64_t>(mob.act), mob.act_token) << ' '
         << format_flag_bits_for_file(static_cast<std::uint64_t>(mob.affected_by),
                                      mob.affected_by_token)
@@ -791,8 +798,8 @@ std::string serialize_mobiles(const std::map<std::int64_t, Mobile>& mobiles) {
     }
     out << '\n';
     if(mob.letter == 'L') {
-      write_tilde_string(out, mob.sounds);
-      write_tilde_string(out, mob.distant_sounds);
+      write_tilde_block(out, mob.sounds);
+      write_tilde_block(out, mob.distant_sounds);
     }
   }
   out << "$~\n";
@@ -820,7 +827,7 @@ std::string serialize_objects(const std::map<std::int64_t, GameObject>& objects)
     for(const auto& ed : obj.extras) {
       out << "E\n";
       write_tilde_string(out, ed.keywords);
-      write_tilde_string(out, ed.description);
+      write_tilde_block(out, ed.description);
     }
     for(const auto& aff : obj.affects) {
       out << "A\n" << aff.location << ' ' << aff.modifier << '\n';
@@ -860,8 +867,8 @@ std::string serialize_zones(const std::map<int, Zone>& zones) {
         out << ' ' << cmd.arg4;
       }
       if(!cmd.comment.empty()) {
-        if(cmd.comment[0] != ' ' && cmd.comment[0] != '*') {
-          out << ' ';
+        if(cmd.comment[0] != ' ') {
+          out << "  ";  // il parser toglie gli spazi prima del commento: rimettili
         }
         out << cmd.comment;
       }

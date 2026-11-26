@@ -2,6 +2,8 @@
 
 #include "app_theme.hpp"
 #include "area_panel.hpp"
+#include "exit_dialog.hpp"
+#include "line_limited_edit.hpp"
 #include "project_panel.hpp"
 #include "project_store.hpp"
 #include "workspace_tree.hpp"
@@ -14,7 +16,15 @@
 #include "eleutheria/workspace_index.hpp"
 #include "eleutheria/world.hpp"
 
+#include <algorithm>
 #include <QApplication>
+#include <QSpinBox>
+#include <QRegularExpression>
+#include <QLineEdit>
+#include <QFormLayout>
+#include <QDialogButtonBox>
+#include <QDialog>
+#include <QComboBox>
 #include <QCloseEvent>
 #include <QColor>
 #include <QDockWidget>
@@ -129,20 +139,16 @@ void MainWindow::setTheme(AppTheme theme) {
 }
 
 void MainWindow::loadMaxLineLength() {
-  QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
-  int value = settings.value(QString::fromUtf8(kMaxLineLengthKey), 0).toInt();
-  if(value < 0) {
-    value = 0;
-  }
-  if(value > 512) {
-    value = 512;
-  }
-  max_line_length_ = value;
+  // Il valore vive in MudTextFormat (modificabile dalla barra di ogni pannello area).
+  max_line_length_ = MudTextFormat::instance().maxLength();
+  connect(&MudTextFormat::instance(), &MudTextFormat::changed, this, [this]() {
+    max_line_length_ = MudTextFormat::instance().maxLength();
+    applyMaxLineLength();
+  });
 }
 
 void MainWindow::saveMaxLineLength() {
-  QSettings settings(QStringLiteral("NebbieArcane"), QStringLiteral("Izanagi"));
-  settings.setValue(QString::fromUtf8(kMaxLineLengthKey), max_line_length_);
+  MudTextFormat::instance().set(max_line_length_, MudTextFormat::instance().justify());
 }
 
 void MainWindow::applyMaxLineLength() {
@@ -192,7 +198,7 @@ void MainWindow::buildUi() {
                        QKeySequence(QStringLiteral("Ctrl+Shift+W")), this,
                        &MainWindow::manageWorkspaces);
   file_menu->addAction(QStringLiteral("&Apri..."), QKeySequence::Open, this, &MainWindow::openAny);
-  file_menu->addAction(QStringLiteral("&Nuova area"), QKeySequence::New, this,
+  file_menu->addAction(QStringLiteral("&Nuova area..."), QKeySequence::New, this,
                        &MainWindow::newArea);
   file_menu->addAction(QStringLiteral("Aggiungi area al workspace..."), this,
                        &MainWindow::addAreaToWorkspace);
@@ -280,9 +286,7 @@ void MainWindow::buildUi() {
   // ---------- Menu Strumenti ----------
   auto* tools_menu = menuBar()->addMenu(QStringLiteral("&Strumenti"));
   tools_menu->addAction(QStringLiteral("&Valida area"), this, &MainWindow::validateActiveArea);
-  tools_menu->addSeparator();
-  tools_menu->addAction(QStringLiteral("Limite caratteri per &riga..."), this,
-                        &MainWindow::editLineLengthLimit);
+
 
   auto* help_menu = menuBar()->addMenu(QStringLiteral("&?"));
   help_menu->addAction(QStringLiteral("Informazioni su Izanagi..."), this, &MainWindow::about);
@@ -308,6 +312,8 @@ QDockWidget* MainWindow::buildWorkspaceDock() {
   tb->setToolButtonStyle(Qt::ToolButtonTextOnly);
   tb->addAction(QStringLiteral("Gestione..."), this, &MainWindow::manageWorkspaces)
       ->setToolTip(QStringLiteral("Elenco dei workspace: apri, crea, aggiungi"));
+  tb->addAction(QStringLiteral("Nuova area..."), this, &MainWindow::newArea)
+      ->setToolTip(QStringLiteral("Crea una nuova area dentro questo workspace"));
   tb->addAction(QStringLiteral("Apri area"), this, &MainWindow::openSelectedWorkspaceArea)
       ->setToolTip(QStringLiteral("Apre l'area selezionata (oppure doppio clic)"));
   tb->addAction(QStringLiteral("Aggiungi area..."), this, &MainWindow::addAreaToWorkspace)
@@ -811,12 +817,158 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::newArea() {
+  if(workspace_) {
+    newAreaInWorkspace();
+    return;
+  }
+  // Senza workspace: area vuota in memoria (al primo salvataggio chiede dove).
   eleutheria::Area area;
   area.meta.name = "Nuova area";
   area.meta.author = "";
   area.meta.mud_id = "nebbie";
   area.dirty = false;
   addAreaPanel(std::move(area), QString());
+}
+
+void MainWindow::newAreaInWorkspace() {
+  ensureProjectsLoaded();
+  // Proposta: primo numero di zona libero dopo il piu' alto del workspace.
+  int max_zone = 0;
+  QSet<int> used_zones;
+  for(const auto& a : workspace_areas_) {
+    max_zone = std::max(max_zone, a.zone_num);
+    if(a.zone_num > 0) {
+      used_zones.insert(a.zone_num);
+    }
+  }
+  // Progetto proposto: quello dell'elemento selezionato nel workspace.
+  QString suggested_project;
+  if(auto* item = workspace_table_->currentItem()) {
+    suggested_project = item->data(0, ws_tree::ProjectRole).toString();
+  }
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(QStringLiteral("Nuova area nel workspace"));
+  auto* form = new QFormLayout(&dialog);
+  auto* folder = new QLineEdit(&dialog);
+  folder->setPlaceholderText(QStringLiteral("es. torre_supplizio (diventa anche il nome dei file)"));
+  auto* name = new QLineEdit(&dialog);
+  name->setPlaceholderText(QStringLiteral("es. La torre del supplizio"));
+  auto* author = new QLineEdit(&dialog);
+  auto* zone = new QSpinBox(&dialog);
+  zone->setRange(1, 799);
+  zone->setValue(std::min(799, max_zone + 1));
+  auto* top = new QSpinBox(&dialog);
+  top->setRange(1, 79999);
+  top->setValue(zone->value() * 100 + 99);
+  auto* range_hint = new QLabel(&dialog);
+  auto* project = new QComboBox(&dialog);
+  project->addItem(QStringLiteral("(nessun progetto)"), QString());
+  for(const auto& p : projects_->projectNames()) {
+    project->addItem(p, p);
+  }
+  if(!suggested_project.isEmpty()) {
+    project->setCurrentIndex(std::max(0, project->findData(suggested_project)));
+  }
+  auto update_hint = [&]() {
+    const int bottom = zone->value() * 100;
+    range_hint->setText(
+        used_zones.contains(zone->value())
+            ? QStringLiteral("<span style='color:#e08a2e'>Zona %1 gia' usata nel workspace</span>")
+                  .arg(zone->value())
+            : QStringLiteral("Prima stanza: #%1 (convenzione zona x 100)").arg(bottom));
+  };
+  connect(zone, qOverload<int>(&QSpinBox::valueChanged), &dialog, [&](int v) {
+    top->setValue(std::min(79999, v * 100 + 99));
+    update_hint();
+  });
+  update_hint();
+  form->addRow(QStringLiteral("Cartella / file"), folder);
+  form->addRow(QStringLiteral("Nome dell'area"), name);
+  form->addRow(QStringLiteral("Autore"), author);
+  form->addRow(QStringLiteral("Numero zona"), zone);
+  form->addRow(QStringLiteral("Top vnum"), top);
+  form->addRow(QString(), range_hint);
+  form->addRow(QStringLiteral("Progetto"), project);
+  auto* buttons = new QDialogButtonBox(&dialog);
+  buttons->addButton(QStringLiteral("Crea"), QDialogButtonBox::AcceptRole);
+  buttons->addButton(QStringLiteral("Annulla"), QDialogButtonBox::RejectRole);
+  form->addRow(buttons);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  dialog.resize(520, dialog.sizeHint().height());
+
+  QString folder_name;
+  QString target;
+  while(true) {
+    if(dialog.exec() != QDialog::Accepted) {
+      return;
+    }
+    folder_name = folder->text().trimmed();
+    static const QRegularExpression kBad(QStringLiteral(R"([\\/:*?"<>|])"));
+    if(folder_name.isEmpty() || folder_name.contains(kBad)) {
+      QMessageBox::warning(this, QStringLiteral("Nuova area"),
+                           QStringLiteral("Scrivi un nome cartella valido (senza / \\ : * ? \" < > |)."));
+      continue;
+    }
+    target = QDir(QString::fromStdString(workspace_->areas_container.string())).filePath(folder_name);
+    if(QFileInfo::exists(target)) {
+      QMessageBox::warning(this, QStringLiteral("Nuova area"),
+                           QStringLiteral("Nel workspace c'e' gia' \"%1\".").arg(folder_name));
+      continue;
+    }
+    break;
+  }
+  if(!QDir().mkpath(target)) {
+    QMessageBox::critical(this, QStringLiteral("Nuova area"),
+                          QStringLiteral("Non riesco a creare la cartella:\n%1")
+                              .arg(QDir::toNativeSeparators(target)));
+    return;
+  }
+
+  eleutheria::Area area;
+  QString zone_name = name->text().trimmed();
+  if(zone_name.isEmpty()) {
+    zone_name = folder_name;
+  }
+  const QString author_text = author->text().trimmed();
+  area.meta.name = zone_name.toStdString();
+  area.meta.author = author_text.toStdString();
+  area.meta.mud_id = "nebbie";
+  eleutheria::Zone z;
+  z.number = zone->value();
+  z.name = (author_text.isEmpty() ? zone_name
+                                  : zone_name + QStringLiteral(" [") + author_text + QStringLiteral("]"))
+               .toStdString();
+  z.top = top->value();
+  area.zones[z.number] = z;
+  area.dirty_zones.insert(z.number);
+  // Una prima stanza, cosi' l'area non e' vuota e ha gia' il vnum giusto.
+  const std::int64_t first_vnum = std::min<std::int64_t>(z.number * 100LL, z.top);
+  eleutheria::Room room;
+  room.vnum = first_vnum;
+  room.name = "Nuova stanza";
+  room.description = "Descrizione.\n";
+  room.zone_hint = z.number;
+  area.rooms[first_vnum] = room;
+  area.dirty_rooms.insert(first_vnum);
+
+  const QString base = QDir(target).filePath(folder_name);
+  try {
+    eleutheria::save_area(area, base.toStdString());
+  } catch(const std::exception& e) {
+    QMessageBox::critical(this, QStringLiteral("Nuova area"), QString::fromUtf8(e.what()));
+    return;
+  }
+  const QString proj = project->currentData().toString();
+  if(!proj.isEmpty()) {
+    projects_->assignAreas({folder_name}, proj);
+  }
+  try {
+    loadWorkspace(QString::fromStdString(workspace_->root.string()), false);
+  } catch(...) {
+  }
+  openPath(target);
 }
 
 void MainWindow::openPath(const QString& path) {
@@ -1056,6 +1208,7 @@ AreaPanel* MainWindow::addAreaPanel(eleutheria::Area area, const QString& base_p
     }
   });
   connect(panel, &AreaPanel::statusMessage, statusBar(), &QStatusBar::showMessage);
+  connect(panel, &AreaPanel::externalExitRequested, this, &MainWindow::applyExitInOtherArea);
   connect(panel, &AreaPanel::closeRequested, this, [this, panel]() { closeAreaPanel(panel); });
   connect(dock, &QDockWidget::visibilityChanged, this, [this, panel](bool visible) {
     if(visible) {
@@ -1500,5 +1653,83 @@ void MainWindow::refreshProjectPanels() {
     if(auto* panel = qobject_cast<ProjectPanel*>(dock->widget())) {
       panel->refresh(workspace_areas_);
     }
+  }
+}
+
+void MainWindow::applyExitInOtherArea(const QString& area_folder, qint64 room_vnum, int dir,
+                                      const eleutheria::Exit& exit, int state) {
+  // 1) Area aperta in un pannello: modifica li' (resta da salvare come le altre modifiche).
+  for(auto* dock : area_docks_) {
+    auto* panel = qobject_cast<AreaPanel*>(dock->widget());
+    if(panel == nullptr || panel->folderName().compare(area_folder, Qt::CaseInsensitive) != 0) {
+      continue;
+    }
+    const auto& rooms = panel->area().rooms;
+    const auto it = rooms.find(room_vnum);
+    if(it == rooms.end()) {
+      return;
+    }
+    const auto& existing = it->second.exits[static_cast<std::size_t>(dir)];
+    if(existing.present && existing.to_room != exit.to_room &&
+       QMessageBox::question(
+           this, QStringLiteral("Uscita di ritorno"),
+           QStringLiteral("Nell'area %1 la stanza #%2 ha gia' un'uscita %3 verso #%4.\nSostituirla?")
+               .arg(area_folder)
+               .arg(room_vnum)
+               .arg(exit_ui::dir_name(dir))
+               .arg(existing.to_room)) != QMessageBox::Yes) {
+      return;
+    }
+    eleutheria::Exit e = exit;
+    e.general_description = existing.general_description;
+    panel->applyExternalExit(room_vnum, dir, e, state);
+    statusBar()->showMessage(
+        QStringLiteral("Uscita di ritorno scritta nell'area aperta %1 (da salvare)").arg(area_folder),
+        6000);
+    return;
+  }
+  // 2) Area non aperta: si modifica il file su disco, chiedendo conferma.
+  QString path;
+  for(const auto& a : workspace_areas_) {
+    if(QString::fromStdString(a.folder_name).compare(area_folder, Qt::CaseInsensitive) == 0) {
+      path = QString::fromStdString(a.path.string());
+      break;
+    }
+  }
+  if(path.isEmpty()) {
+    return;
+  }
+  try {
+    auto loaded = eleutheria::load_area(path.toStdString());
+    auto& area = loaded.area;
+    const auto it = area.rooms.find(room_vnum);
+    if(it == area.rooms.end()) {
+      return;
+    }
+    const auto& existing = it->second.exits[static_cast<std::size_t>(dir)];
+    QString question = QStringLiteral(
+                           "Scrivo l'uscita di ritorno (%1 verso #%2) nella stanza #%3 dell'area "
+                           "\"%4\"?\n\nL'area non e' aperta: il suo file viene salvato subito.")
+                           .arg(exit_ui::dir_name(dir))
+                           .arg(exit.to_room)
+                           .arg(room_vnum)
+                           .arg(area_folder);
+    if(existing.present && existing.to_room != exit.to_room) {
+      question += QStringLiteral("\n\nAttenzione: sostituisce l'uscita attuale verso #%1.")
+                      .arg(existing.to_room);
+    }
+    if(QMessageBox::question(this, QStringLiteral("Uscita di ritorno"), question) !=
+       QMessageBox::Yes) {
+      return;
+    }
+    eleutheria::Exit e = exit;
+    e.general_description = existing.general_description;
+    exit_ui::apply_exit(area, room_vnum, dir, e, static_cast<exit_ui::SpawnState>(state));
+    eleutheria::save_area(area, area.base_path);
+    statusBar()->showMessage(
+        QStringLiteral("Uscita di ritorno salvata nell'area %1").arg(area_folder), 6000);
+    rebuildWorkspaceIndex();
+  } catch(const std::exception& e) {
+    QMessageBox::critical(this, QStringLiteral("Uscita di ritorno"), QString::fromUtf8(e.what()));
   }
 }
